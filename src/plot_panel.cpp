@@ -120,7 +120,12 @@ void draw_time_series_panel(
         if (margin < 0.01f) margin = 0.5f;
 
         if (ImPlot::BeginPlot(pc.title.c_str(), ImVec2(-1, plot_h))) {
-            ImPlot::SetupAxes("t [s]", nullptr);
+            // No axis titles.  Every plot in this panel is a time series and
+            // every one of them said "t [s]" underneath, which is a label the
+            // reader has already worked out from the first plot — and it costs
+            // a row of height on each of eight stacked plots.  The tick
+            // numbers stay; it is the title that is redundant.
+            ImPlot::SetupAxes(nullptr, nullptr);
             ImPlot::SetupAxisLimits(ImAxis_X1, t_min, t_max, ImPlotCond_Always);
             ImPlot::SetupAxisLimits(ImAxis_Y1, y_lo - margin, y_hi + margin, ImPlotCond_Always);
             ImPlot::SetupLegend(ImPlotLocation_East, ImPlotLegendFlags_Outside);
