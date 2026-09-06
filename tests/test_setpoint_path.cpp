@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 using namespace caliburn;
 
@@ -170,6 +171,16 @@ struct Run {
         path.radius_m = radius_m;
         path.period_s = clampPeriod(path, path.period_s);
     }
+
+    /// The shape combo.  The new shape picks up nearest to where the setpoint
+    /// already is — `phaseNearest`, the panel's own rule — because phase means
+    /// a different place on each shape.
+    void setShape(PathShape s) {
+        const Eigen::Vector2d was = point();
+        path.shape = s;
+        path.period_s = clampPeriod(path, path.period_s);
+        phase = phaseNearest(path, was);
+    }
 };
 
 // The lap slider changes the RATE and nothing else.  Not approximately —
@@ -266,6 +277,106 @@ void test_a_lap_change_takes_effect_from_that_moment() {
     ASSERT_NEAR(moved, 0.2, 1e-9);
 }
 
+// Changing shape must not move the setpoint either — the third control, and
+// the one that was worst.  Phase is NOT comparable across shapes: the circle's
+// phase zero is at +x while a polygon's first corner is at the top, so equal
+// phase is a quarter of a lap apart.  Carrying it over threw the target 170 mm
+// to the far side of a 120 mm path, and the loop hauled the ball across after
+// it hard enough to drive the legs into the workspace clip.
+void test_changing_the_shape_picks_up_where_the_setpoint_is() {
+    const PathShape all[] = {PathShape::Circle, PathShape::Square,
+                             PathShape::Triangle};
+    double worst = 0.0;
+    for (PathShape from : all) {
+        for (PathShape to : all) {
+            for (int i = 0; i < 64; ++i) {
+                Run r;
+                r.path = shape(from, 0.12, 10.0);
+                r.phase = i / 64.0;
+
+                const Eigen::Vector2d before = r.point();
+                r.setShape(to);
+                const Eigen::Vector2d after = r.point();
+                worst = std::max(worst, (after - before).norm());
+
+                // Switching to the SAME shape is exactly a no-op, at every
+                // phase — the nearest point on a path to a point already on it
+                // is that point.
+                if (from == to) ASSERT_NEAR((after - before).norm(), 0.0, 1e-9);
+            }
+        }
+    }
+    // The shapes themselves differ, so a switch cannot be free — but it is
+    // bounded by how far apart the two paths ARE, which is the least it could
+    // possibly be.  Measured over every ordered pair at 64 phases, on a 120 mm
+    // path: 35.15 mm circle <-> square, 42.43 mm square -> triangle, and 60.00
+    // mm circle <-> triangle, which is exactly the r/2 a triangle's inradius
+    // leaves.  Nothing like the 169.7 mm a carried phase gave at EVERY phase.
+    ASSERT_TRUE(worst < 0.061);
+}
+
+// And the bound above is only meaningful next to what it replaced.  Carrying
+// the phase across a shape change — the obvious simplification, and what the
+// code did — is 170 mm on this path at EVERY phase in the lap.  Asserted so
+// that reverting to it fails a test rather than merely feeling smoother.
+void test_carrying_the_phase_across_a_shape_change_would_be_far_worse() {
+    const SetpointPath circle = shape(PathShape::Circle, 0.12, 10.0);
+    const SetpointPath square = shape(PathShape::Square, 0.12, 10.0);
+
+    double worst_carried = 0.0, worst_reseeded = 0.0;
+    for (int i = 0; i < 512; ++i) {
+        const double u = i / 512.0;
+        const Eigen::Vector2d on_circle = pathPoint(circle, u);
+        // What carrying the phase does.
+        worst_carried = std::max(worst_carried,
+                                 (pathPoint(square, u) - on_circle).norm());
+        // What re-seeding does.
+        const Eigen::Vector2d seeded =
+            pathPoint(square, phaseNearest(square, on_circle));
+        worst_reseeded = std::max(worst_reseeded, (seeded - on_circle).norm());
+    }
+    ASSERT_TRUE(worst_carried > 0.16);      // measured 169.7 mm
+    ASSERT_TRUE(worst_reseeded < 0.036);    // measured 35.1 mm
+    ASSERT_TRUE(worst_reseeded * 4.0 < worst_carried);
+}
+
+// `phaseNearest` really is the nearest, not merely a good guess — it is solved
+// in closed form, so it is worth checking against a brute-force sweep.
+void test_the_nearest_phase_is_actually_the_nearest() {
+    const Eigen::Vector2d probes[] = {
+        Eigen::Vector2d(0.12, 0.0),   Eigen::Vector2d(-0.03, 0.09),
+        Eigen::Vector2d(0.0, -0.2),   Eigen::Vector2d(0.001, 0.0),
+        Eigen::Vector2d(0.4, 0.4),    Eigen::Vector2d(-0.07, -0.02),
+    };
+    for (PathShape s : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
+        const SetpointPath p = shape(s, 0.12, 10.0);
+        for (const Eigen::Vector2d& t : probes) {
+            const double got = (pathPoint(p, phaseNearest(p, t)) - t).norm();
+            double brute = std::numeric_limits<double>::max();
+            for (int i = 0; i < 20000; ++i)
+                brute = std::min(brute, (pathPoint(p, i / 20000.0) - t).norm());
+            // The sweep can only ever be worse, up to its own resolution.
+            ASSERT_TRUE(got <= brute + 1e-6);
+        }
+    }
+}
+
+// The centre is equidistant from every point of a path, so it has no nearest
+// one.  It answers phase zero rather than a NaN, which would poison the walk.
+void test_the_centre_has_no_nearest_phase_and_says_so() {
+    // Phase zero for every shape, and the same answer every time.  Left to the
+    // polygon walk this came back 0.375 — the midpoint of whichever edge
+    // rounding made shortest, which is a tie broken by noise.
+    for (PathShape s : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
+        const double u = phaseNearest(shape(s, 0.12, 10.0), Eigen::Vector2d::Zero());
+        ASSERT_TRUE(std::isfinite(u));
+        ASSERT_NEAR(u, 0.0, 1e-15);
+    }
+    // And a `Fixed` path is a point, not a lap: every phase is that point.
+    ASSERT_NEAR(phaseNearest(shape(PathShape::Fixed), Eigen::Vector2d(0.1, 0.1)),
+                0.0, 1e-15);
+}
+
 // Drawing: a polygon is drawn by its corners, a circle by samples.  A square
 // drawn as a chord of samples is a square drawn wrong.
 void test_the_outline_is_drawable() {
@@ -299,6 +410,10 @@ int main() {
     test_the_reference_velocity_steps_on_a_lap_change();
     test_changing_the_size_moves_the_setpoint_radially_only();
     test_a_lap_change_takes_effect_from_that_moment();
+    test_changing_the_shape_picks_up_where_the_setpoint_is();
+    test_carrying_the_phase_across_a_shape_change_would_be_far_worse();
+    test_the_nearest_phase_is_actually_the_nearest();
+    test_the_centre_has_no_nearest_phase_and_says_so();
     test_the_outline_is_drawable();
     std::printf("test_setpoint_path: all passed\n");
     return 0;

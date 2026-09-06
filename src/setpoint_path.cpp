@@ -93,6 +93,43 @@ Eigen::Vector2d pathVelocity(const SetpointPath& p, double phase) {
     return (to - from) * (n / p.period_s);
 }
 
+double phaseNearest(const SetpointPath& p, const Eigen::Vector2d& target) {
+    // The centre is equidistant from every point of any closed path round it,
+    // so it has no nearest one and the answer is a choice rather than a
+    // computation.  Made here, once, for every shape: without it the polygon
+    // walk below picks whichever edge rounding happened to make shortest,
+    // which is arbitrary AND liable to differ between builds.  Reachable in
+    // one press — "Centre setpoint", then choose a shape.
+    if (target.squaredNorm() <= 0.0) return 0.0;
+
+    switch (p.shape) {
+        case PathShape::Fixed:
+            return 0.0;
+        case PathShape::Circle:
+            return wrap01(std::atan2(target(1), target(0)) / (2.0 * M_PI));
+        default:
+            break;
+    }
+    const int n = corners(p.shape);
+    double best_d2 = -1.0, best_phase = 0.0;
+    for (int k = 0; k < n; ++k) {
+        const Eigen::Vector2d a = corner(k, n, p.radius_m);
+        const Eigen::Vector2d edge = corner(k + 1, n, p.radius_m) - a;
+        // Clamped, so the answer is a point ON the edge rather than on the
+        // infinite line through it — which for a corner is the corner itself.
+        const double len2 = edge.squaredNorm();
+        const double f = (len2 > 0.0)
+                             ? std::clamp((target - a).dot(edge) / len2, 0.0, 1.0)
+                             : 0.0;
+        const double d2 = (a + f * edge - target).squaredNorm();
+        if (best_d2 < 0.0 || d2 < best_d2) {
+            best_d2 = d2;
+            best_phase = (k + f) / n;
+        }
+    }
+    return wrap01(best_phase);
+}
+
 double clampPeriod(const SetpointPath& p, double asked_s) {
     return std::max(asked_s, minPeriod(p));
 }

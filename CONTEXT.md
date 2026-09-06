@@ -643,7 +643,20 @@ indirectly — a bigger path raises the lap floor, which pushes `period_s` up.
 
 Accumulating instead means a lap change alters only the **rate**, from that
 moment on, and a size change slides the setpoint **radially**: same angle,
-bigger shape.  Two rules go with it, and both live in `setpoint_path.h` rather
+bigger shape.  **A shape change re-seeds the phase** rather than carrying it,
+because phase is not comparable across shapes: the circle's phase zero is at +x
+and a polygon's first corner is at the top, so equal phase is a quarter of a lap
+apart — measured, **169.7 mm** between a 120 mm circle and the square, at every
+phase in the lap.  Carrying it threw the target to the far side of the path and
+the loop hauled the ball across after it, into the workspace clip.  `phaseNearest`
+picks the point on the new shape closest to where the setpoint already is, which
+moves it by the least the two shapes allow: 35 mm circle to square, 60 mm circle
+to triangle — exactly the `r/2` a triangle's inradius leaves — and nothing at all
+when the shape does not change.
+
+So all three trajectory controls now keep one promise: **the setpoint never
+jumps.**  The lap changes its speed, the size slides it radially, and the shape
+moves it as little as two different shapes permit.  Two rules go with it, and both live in `setpoint_path.h` rather
 than in the panel so that the tests exercise them rather than their own copies:
 `stepPath` owns the **order** — read the setpoint at the phase the frame opened
 on, advance afterwards, so the position and the velocity handed to the loop are

@@ -668,8 +668,22 @@ void PlateView::drawBalanceControls() {
     static_assert(IM_ARRAYSIZE(shapes) == static_cast<int>(PathShape::Triangle) + 1,
                   "shapes is index-coupled to PathShape");
     int shape_idx = static_cast<int>(path_.shape);
-    if (ImGui::Combo("Trajectory", &shape_idx, shapes, IM_ARRAYSIZE(shapes)))
+    if (ImGui::Combo("Trajectory", &shape_idx, shapes, IM_ARRAYSIZE(shapes))) {
         path_.shape = static_cast<PathShape>(shape_idx);
+        // The new shape picks up nearest to where the setpoint already is,
+        // rather than at whatever the carried phase means on it.  Phase is not
+        // comparable across shapes — the circle's zero is at +x, a polygon's
+        // first corner is at the top — so carrying it moved the target 170 mm
+        // to the far side of the path and the loop hauled the ball across
+        // after it, into the workspace clip.  See `phaseNearest`.
+        //
+        // From the radius the slider holds, not the one `step` last copied:
+        // the same one-frame skew the lap floor had, and the polygon corners
+        // this reads are a function of it.
+        path_.radius_m = path_radius_mm_ * 1e-3;
+        path_phase_ = phaseNearest(
+            path_, Eigen::Vector2d(sp_x_mm_ * 1e-3, sp_y_mm_ * 1e-3));
+    }
 
     const bool on_a_path = path_.shape != PathShape::Fixed;
     if (on_a_path) {

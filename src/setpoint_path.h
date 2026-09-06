@@ -141,6 +141,33 @@ struct PathStep {
 /// still returns a zero point and a phase that does not move.
 PathStep stepPath(const SetpointPath& p, double phase, double dt);
 
+/// The phase at which `p` passes closest to `target`.
+///
+/// For changing SHAPE without moving the setpoint.  Phase is not comparable
+/// across shapes: the circle's phase zero is at +x and a polygon's first corner
+/// is at the top, so the same phase is a quarter of a lap apart — measured,
+/// **170 mm** between a 120 mm circle and the square at every phase in the lap.
+/// Carrying the phase across a shape change therefore teleports the target to
+/// the far side of the path and the loop hauls the ball after it, hard enough
+/// to drive the legs into the workspace clip.
+///
+/// Re-seeding from the point the setpoint is already at moves it by at most the
+/// distance between the two shapes themselves — 35 mm for that circle and
+/// square, and zero wherever they touch.  It is the same promise the size
+/// slider makes: the target does not jump, it slides to the new path.
+///
+/// Exact rather than searched.  The nearest point on a circle is the radial
+/// projection; on a polygon it is the nearest of its edges' clamped
+/// projections, and there are at most four edges.
+///
+/// The exact centre is equidistant from the whole path and so has no nearest
+/// point: it answers phase zero, for every shape, because the alternative is
+/// the polygon walk picking whichever edge rounding made shortest — arbitrary,
+/// and free to differ between builds.  It is one press away ("Centre setpoint",
+/// then choose a shape).  A point merely NEAR the centre is still decided by
+/// the arithmetic, which is correct: it genuinely does have a nearest point.
+double phaseNearest(const SetpointPath& p, const Eigen::Vector2d& target);
+
 /// The path's total length, for drawing it and for reasoning about speed.
 double pathLength(const SetpointPath& p);
 
