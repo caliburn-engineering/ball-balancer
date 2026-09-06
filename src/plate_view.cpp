@@ -101,7 +101,8 @@ PlateView::PlateView()
       s_bx_("x", kBufSize),
       s_by_("y", kBufSize),
       s_bz_("z", kBufSize),
-      s_err_("e", kBufSize) {
+      s_ex_("x", kBufSize),
+      s_ey_("y", kBufSize) {
     camera_ = defaultCamera();
 
     home_ = tk_.home_pose();
@@ -128,9 +129,11 @@ PlateView::PlateView()
         // time and millimetres when it is not, so sharing a plot with the
         // horizontal position would flatten it to a line on the axis.
         {"Ball Height [mm]", {&s_bz_}, 5},
-        // Tracking error: the distance from the ball to where it was told to
-        // be.  Flat under a fixed setpoint, and the whole story under a path.
-        {"Tracking Error [mm]", {&s_err_}, 6},
+        // Tracking error, per axis and signed — see `s_ex_`.  Two series
+        // rather than their distance, because the distance is flat whenever
+        // the error is merely rotating, which under a path is most of the
+        // time.  Flat under a fixed setpoint, and the whole story under a path.
+        {"Tracking Error [mm]", {&s_ex_, &s_ey_}, 6},
         {"Table Angles [deg]", {&s_phi_, &s_theta_}, 1},
         {"Servo Angles [deg]", {&s_a0_, &s_a1_, &s_a2_}, 2},
         {"Condition Number",   {&s_cond_}, 3},
@@ -414,9 +417,10 @@ void PlateView::step(GLFWwindow* window, float dt) {
     // Height above the surface, not above the table centre: zero means resting
     // on it, which is what a reader of this plot wants the line to mean.
     push_series(s_bz_,    static_cast<float>((bp(2) - kBallRadius) * 1000), plot_state_);
-    push_series(s_err_,   static_cast<float>(std::hypot(bp(0) - sp_x_mm_ * 1e-3,
-                                                        bp(1) - sp_y_mm_ * 1e-3) * 1000),
-                plot_state_);
+    // Signed, and in the plate frame the setpoint is already expressed in, so
+    // a positive x error means the ball is further along +x than it was told.
+    push_series(s_ex_,    static_cast<float>(bp(0) * 1000) - sp_x_mm_, plot_state_);
+    push_series(s_ey_,    static_cast<float>(bp(1) * 1000) - sp_y_mm_, plot_state_);
     push_series(s_phi_,   static_cast<float>(pose_.phi / kDeg), plot_state_);
     push_series(s_theta_, static_cast<float>(pose_.theta / kDeg), plot_state_);
     push_series(s_a0_,    alpha_deg_[0], plot_state_);

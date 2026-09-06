@@ -227,7 +227,21 @@ private:
     TimeSeries s_a0_, s_a1_, s_a2_;
     TimeSeries s_cond_, s_zc_;
     TimeSeries s_bx_, s_by_, s_bz_;
-    TimeSeries s_err_;
+    /// Tracking error, as its two SIGNED components rather than one distance.
+    ///
+    /// `hypot` of the pair was what this plotted, and it rectifies: it cannot
+    /// go negative and it throws away which way the ball is off.  On a circle
+    /// the loop trails the setpoint by a roughly fixed angle, so the distance
+    /// is nearly constant while each component swings the full amplitude a
+    /// quarter-lap out of phase with the other — measured, |e| held between
+    /// 5.2 and 5.7 mm while ex and ey each swept +/-5 mm.  The plot drew that
+    /// as a flat line, which reads as a steady offset and is the wrong
+    /// conclusion: the error is a vector of near-constant length going round
+    /// once per lap.
+    ///
+    /// The magnitude is not lost — it is the `error:` readout beside the
+    /// setpoint sliders.  Plot shows the structure, number shows the size.
+    TimeSeries s_ex_, s_ey_;
     std::vector<PlotConfig> plots_;
 
     ComparisonPanel comparison_panel_;
