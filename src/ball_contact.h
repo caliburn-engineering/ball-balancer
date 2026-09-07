@@ -26,6 +26,44 @@ struct PlateMotion {
     Eigen::Vector3d c_dot = Eigen::Vector3d::Zero();
     Eigen::Vector3d omega = Eigen::Vector3d::Zero();  ///< angular velocity
 
+    /// The accelerations, and they are the whole question — a ball leaves a
+    /// plate because of how the surface ACCELERATES, not how it moves.
+    ///
+    /// **These are analytic, and that is not a refinement.**  They were a
+    /// finite difference of `c_dot` and `omega` across consecutive frames,
+    /// which is a defensible estimator for a smooth signal and these are not
+    /// smooth: the leg rate is `(cmd - alpha) / tau`, and `cmd` is a zero-order
+    /// hold that STEPS every time the loop changes its mind.  Differencing a
+    /// step gives `1/dt`, so the estimator answered with a delta function
+    /// wherever the command jumped.
+    ///
+    /// Measured at the corner of a square path on a thirty-second lap — a
+    /// setpoint crawling at 24 mm/s, about as gentle as this demo gets — the
+    /// difference reported `|omega_dot| = 101 rad/s^2` and a normal force of
+    /// `-7.3 m/s^2`, and the ball was thrown off a plate that was barely
+    /// moving.  A corner is a step in the reference velocity by construction
+    /// (`pathVelocity` says so), so this fired on every corner of every lap.
+    ///
+    /// Analytically the servo lag differentiates in closed form: `cmd` is held
+    /// across the frame, so `alpha_ddot = -alpha_dot / tau` exactly, and the
+    /// same Jacobian that carries `alpha_dot` to `pose_dot` carries this to
+    /// `pose_ddot`.  The one term left to difference is the Jacobian's own
+    /// change, and that is a function of the leg angles and the pose — both
+    /// continuous, neither of them stepping.  The corner then reads
+    /// `|omega_dot| = 50 rad/s^2`, which is what a servo with a 0.05 s lag
+    /// actually does when its command jumps.  See #23.
+    Eigen::Vector3d c_ddot = Eigen::Vector3d::Zero();
+    Eigen::Vector3d omega_dot = Eigen::Vector3d::Zero();
+
+    /// The two maps this frame, kept so the NEXT frame can difference them.
+    ///
+    /// `J_v` takes leg rates to pose rates and `A` takes the tilt rates to the
+    /// angular velocity.  Both depend only on the leg angles and the pose, so
+    /// differencing them is differencing something continuous — which is the
+    /// whole point of keeping them rather than differencing the rates.
+    Eigen::Matrix3d J_v = Eigen::Matrix3d::Zero();
+    Eigen::Matrix<double, 3, 2> A = Eigen::Matrix<double, 3, 2>::Zero();
+
     /// Whether `c_dot` and `omega` are worth believing.
     ///
     /// They come through the velocity Jacobian, which is `-J_pose^-1 J_alpha`,
@@ -51,14 +89,35 @@ struct PlateMotion {
 /// about when this mechanism is in trouble.
 inline constexpr double kRatesUntrustworthyAbove = 20.0;
 
-/// Assemble the plate's motion from where the legs are and how fast they move.
+/// Assemble the plate's motion from where the legs are and how they are moving.
 ///
-/// `alpha_dot` is exact rather than differenced: the servos are a first-order
-/// lag, so `alpha_dot = (cmd - alpha) / tau` is the model's own derivative.
+/// `alpha_dot` and `alpha_ddot` are both exact rather than differenced: the
+/// servos are a first-order lag, so `alpha_dot = (cmd - alpha) / tau` is the
+/// model's own derivative and `alpha_ddot = -alpha_dot / tau` its own second,
+/// for as long as `cmd` is held — which is the whole frame.  `servoAccel`
+/// writes that down so no caller has to.
+///
+/// `prev` supplies the previous frame's `J_v` and `A` so their rates of change
+/// can be differenced.  Passing `nullptr` drops those two terms, which is right
+/// for the first frame — nothing has changed yet — and is why a plate assembled
+/// without a history reports the acceleration its legs are producing rather
+/// than nothing at all.
 PlateMotion plateMotion(const TableKinematics& tk,
                         const TablePose& pose,
                         const std::array<double, 3>& alpha_rad,
-                        const std::array<double, 3>& alpha_dot_rad_s);
+                        const std::array<double, 3>& alpha_dot_rad_s,
+                        const std::array<double, 3>& alpha_ddot_rad_s2 = {0.0, 0.0, 0.0},
+                        const PlateMotion* prev = nullptr,
+                        double dt = 0.0);
+
+/// The servo lag's own second derivative: `alpha_ddot = -alpha_dot / tau`.
+///
+/// Exact while the command is held, which it is for the whole frame.  Here
+/// rather than at each call site because five harnesses and the application all
+/// need it and a sixth opinion about the servo model is how they come to
+/// disagree.
+std::array<double, 3> servoAccel(const std::array<double, 3>& alpha_dot_rad_s,
+                                 double tau);
 
 /// The normal force per unit mass holding the ball on the plate, `N / m`.
 ///
@@ -81,14 +140,11 @@ PlateMotion plateMotion(const TableKinematics& tk,
 /// so a negative answer means the plate is accelerating away faster than
 /// gravity can carry the ball after it, and contact is over.
 ///
-/// `prev` and `dt` supply `omega_dot` and `c_ddot` by one finite difference.
-/// That difference is of analytic rates rather than of sampled positions,
-/// which is the difference between a usable number and noise: differencing
-/// `z_c` twice across three frames at 60 Hz gives an answer that swings by
-/// tens of m/s^2 on rounding alone.
-double normalAccel(const PlateMotion& now,
-                   const PlateMotion& prev,
-                   double dt,
+/// `omega_dot` and `c_ddot` are read off `plate` rather than differenced out of
+/// two frames.  See `PlateMotion::c_ddot` for why that stopped being a detail:
+/// the leg command is a zero-order hold, so differencing the rates it drives
+/// answers with a delta function at every step of the command.
+double normalAccel(const PlateMotion& plate,
                    const Eigen::Vector3d& s,
                    const Eigen::Vector2d& s_dot,
                    double gravity);
@@ -148,10 +204,12 @@ void worldOf(const BallState& b, const PlateMotion& plate, double ball_radius,
 /// Rolling while the plate can still push (`N/m > 0`), ballistic when it
 /// cannot — and rolling regardless while `now.rates_trustworthy` is false,
 /// because a separation is a claim about the plate's velocity and this is the
-/// case where nobody knows what that is.  The launch takes the ball's full world velocity — including the
-/// plate's motion at the contact point, which is most of it when the legs are
-/// slamming — and the landing is inelastic: the normal component of the
-/// approach is absorbed and the tangential part carries on rolling.
+/// case where nobody knows what that is.  The launch takes the ball's full
+/// world velocity — including the plate's motion at the contact point, which is
+/// most of it when the legs are slamming.
+///
+/// The landing is inelastic: the normal component of the approach is absorbed
+/// and the tangential part carries on rolling.
 ///
 /// Inelastic rather than bouncing, deliberately.  A real ball does bounce, but
 /// a restitution coefficient is a number nobody here has measured, and the

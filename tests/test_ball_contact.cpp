@@ -43,8 +43,7 @@ PlateMotion still(const TableKinematics& tk, double phi, double theta, double z_
 void test_a_still_level_plate_holds_the_ball_at_one_g() {
     const TableKinematics tk(plate());
     const PlateMotion m = still(tk, 0.0, 0.0, 0.2121);
-    const double N = normalAccel(m, m, 1.0 / 60.0,
-                                 Eigen::Vector3d(0.0, 0.0, kR),
+    const double N = normalAccel(m, Eigen::Vector3d(0.0, 0.0, kR),
                                  Eigen::Vector2d::Zero(), kG);
     ASSERT_NEAR(N, kG, 1e-12);
 }
@@ -55,8 +54,7 @@ void test_a_tilted_still_plate_holds_the_cosine_share() {
     const TableKinematics tk(plate());
     for (double deg : {5.0, 15.0, 30.0}) {
         const PlateMotion m = still(tk, deg * kDeg, 0.0, 0.2121);
-        const double N = normalAccel(m, m, 1.0 / 60.0,
-                                     Eigen::Vector3d(0.0, 0.0, kR),
+        const double N = normalAccel(m, Eigen::Vector3d(0.0, 0.0, kR),
                                      Eigen::Vector2d::Zero(), kG);
         ASSERT_NEAR(N, kG * std::cos(deg * kDeg), 1e-12);
     }
@@ -67,13 +65,11 @@ void test_a_tilted_still_plate_holds_the_cosine_share() {
 // falling with it and touching it with nothing.  Below that, contact is over.
 void test_heave_cancels_the_normal_force_at_one_g() {
     const TableKinematics tk(plate());
-    const double dt = 1.0 / 60.0;
 
     auto heaving = [&](double zc_ddot) {
-        PlateMotion now = still(tk, 0, 0, 0.2121), prev = now;
-        // c_ddot comes from differencing c_dot, so stage the two frames.
-        now.c_dot = Eigen::Vector3d(0, 0, zc_ddot * dt);
-        return normalAccel(now, prev, dt, Eigen::Vector3d(0, 0, kR),
+        PlateMotion m = still(tk, 0, 0, 0.2121);
+        m.c_ddot = Eigen::Vector3d(0, 0, zc_ddot);
+        return normalAccel(m, Eigen::Vector3d(0, 0, kR),
                            Eigen::Vector2d::Zero(), kG);
     };
 
@@ -90,15 +86,13 @@ void test_heave_cancels_the_normal_force_at_one_g() {
 // confused with the next one.
 void test_steady_rotation_pulls_on_the_balls_own_radius() {
     const TableKinematics tk(plate());
-    const double dt = 1.0 / 60.0;
 
-    PlateMotion now = still(tk, 0, 0, 0.2121), prev = now;
-    now.omega = Eigen::Vector3d(2.0, 0.0, 0.0);
-    prev.omega = now.omega;
+    PlateMotion m = still(tk, 0, 0, 0.2121);
+    m.omega = Eigen::Vector3d(2.0, 0.0, 0.0);   // steady: omega_dot stays zero
 
-    const double centred = normalAccel(now, prev, dt, Eigen::Vector3d(0, 0, kR),
+    const double centred = normalAccel(m, Eigen::Vector3d(0, 0, kR),
                                        Eigen::Vector2d::Zero(), kG);
-    const double off = normalAccel(now, prev, dt, Eigen::Vector3d(0, 0.10, kR),
+    const double off = normalAccel(m, Eigen::Vector3d(0, 0.10, kR),
                                    Eigen::Vector2d::Zero(), kG);
     ASSERT_NEAR(centred, kG - 2.0 * 2.0 * kR, 1e-9);
     ASSERT_NEAR(off, centred, 1e-12);
@@ -110,17 +104,16 @@ void test_steady_rotation_pulls_on_the_balls_own_radius() {
 // term that takes the ball off the plate when the loop slams the legs over.
 void test_angular_acceleration_lifts_one_side_and_drops_the_other() {
     const TableKinematics tk(plate());
-    const double dt = 1.0 / 60.0;
     const double alpha_dd = 40.0;   // [rad/s^2] about x
 
-    PlateMotion now = still(tk, 0, 0, 0.2121), prev = now;
-    now.omega = Eigen::Vector3d(alpha_dd * dt, 0.0, 0.0);   // prev.omega is zero
+    PlateMotion m = still(tk, 0, 0, 0.2121);
+    m.omega_dot = Eigen::Vector3d(alpha_dd, 0.0, 0.0);   // omega itself is zero
 
-    const double centred = normalAccel(now, prev, dt, Eigen::Vector3d(0, 0, kR),
+    const double centred = normalAccel(m, Eigen::Vector3d(0, 0, kR),
                                        Eigen::Vector2d::Zero(), kG);
-    const double plus_y = normalAccel(now, prev, dt, Eigen::Vector3d(0, 0.10, kR),
+    const double plus_y = normalAccel(m, Eigen::Vector3d(0, 0.10, kR),
                                       Eigen::Vector2d::Zero(), kG);
-    const double minus_y = normalAccel(now, prev, dt, Eigen::Vector3d(0, -0.10, kR),
+    const double minus_y = normalAccel(m, Eigen::Vector3d(0, -0.10, kR),
                                        Eigen::Vector2d::Zero(), kG);
 
     // omega_dot x r has vertical component alpha_dd * y, so the two sides
@@ -135,19 +128,17 @@ void test_angular_acceleration_lifts_one_side_and_drops_the_other() {
 // than one sitting still on it, at the same instant and the same place.
 void test_a_rolling_ball_is_held_differently_from_a_still_one() {
     const TableKinematics tk(plate());
-    const double dt = 1.0 / 60.0;
 
-    PlateMotion now = still(tk, 0, 0, 0.2121), prev = now;
-    now.omega = Eigen::Vector3d(1.5, 0.0, 0.0);   // tilting about x
-    prev.omega = now.omega;
+    PlateMotion m = still(tk, 0, 0, 0.2121);
+    m.omega = Eigen::Vector3d(1.5, 0.0, 0.0);   // tilting about x
 
     const Eigen::Vector3d s(0.05, 0.0, kR);
-    const double at_rest = normalAccel(now, prev, dt, s, Eigen::Vector2d(0, 0), kG);
-    const double rolling = normalAccel(now, prev, dt, s, Eigen::Vector2d(0, 0.4), kG);
+    const double at_rest = normalAccel(m, s, Eigen::Vector2d(0, 0), kG);
+    const double rolling = normalAccel(m, s, Eigen::Vector2d(0, 0.4), kG);
     ASSERT_TRUE(std::abs(rolling - at_rest) > 0.1);
     // Rolling along +y under a +x rotation is carried downward, so it presses
     // less hard.  Reverse the roll and it presses harder by the same amount.
-    const double other_way = normalAccel(now, prev, dt, s, Eigen::Vector2d(0, -0.4), kG);
+    const double other_way = normalAccel(m, s, Eigen::Vector2d(0, -0.4), kG);
     ASSERT_NEAR(rolling + other_way, 2.0 * at_rest, 1e-9);
 }
 
@@ -216,6 +207,7 @@ void test_a_dropped_plate_launches_the_ball_on_a_parabola() {
         const TablePose pose{0.0, 0.0, zc};
         PlateMotion now = still(tk, 0, 0, zc);
         now.c_dot = Eigen::Vector3d(0, 0, vzc);
+        now.c_ddot = Eigen::Vector3d(0, 0, a_plate);
 
         const bool was_rolling = !b.airborne;
         b = stepBallContact(dyn, b, now, prev, pose, kR, kG, dt);
@@ -325,6 +317,7 @@ void test_untrustworthy_rates_never_separate_the_ball() {
     PlateMotion prev = still(tk, 0, 0, 0.2121);
     PlateMotion now = still(tk, 0, 0, 0.2121 - 0.5 * 3.0 * kG * dt * dt);
     now.c_dot = Eigen::Vector3d(0, 0, -3.0 * kG * dt);
+    now.c_ddot = Eigen::Vector3d(0, 0, -3.0 * kG);
 
     BallState trusted;
     trusted.rolling << 0.03, 0.0, 0.0, 0.0;
@@ -342,38 +335,176 @@ void test_untrustworthy_rates_never_separate_the_ball() {
     ASSERT_TRUE(!doubted.airborne);
 }
 
-// And the half of the gate that was missing: `normalAccel` reaches an
-// acceleration by differencing `now` against `prev`, so the FIRST believable
-// frame after a singular stretch is differenced against a garbage one.  Trust
-// has to cover both ends of that difference or the guard leaks exactly the hop
-// it exists to refuse.
+// And the half of the gate that is easy to drop.  The accelerations are
+// analytic in the servo lag now, but not entirely differenceless: `plateMotion`
+// still differences `J_v` and `A` across the two frames, and `J_v` is
+// `-J_pose^-1 J_alpha` — the very quantity that blows up near a singularity.
+// So the FIRST believable frame after a singular stretch still carries a term
+// built from an unbelievable one, and trust has to cover both ends or the guard
+// leaks exactly the hop it exists to refuse.
 void test_a_trustworthy_frame_after_an_untrusted_one_still_declines() {
     const TableKinematics tk(plate());
     const RollingBallDynamics dyn = roller();
     const double dt = 1.0 / 60.0;
 
-    // `prev` carries a wild rate — the arithmetic a near-singular Jacobian
-    // hands back — and `now` is a plate sitting still.  Differenced, that reads
-    // as an enormous upward acceleration reversing, and the ball is reported
-    // to leave a motionless plate.
+    // A plate whose own acceleration says the ball should leave, reached on the
+    // first frame out of a stretch nobody believed.
     PlateMotion prev = still(tk, 0, 0, 0.2121);
-    prev.c_dot = Eigen::Vector3d(0, 0, 12.0);
     prev.rates_trustworthy = false;
 
     PlateMotion now = still(tk, 0, 0, 0.2121);
+    now.c_ddot = Eigen::Vector3d(0, 0, -3.0 * kG);
     now.rates_trustworthy = true;
 
     BallState b;
     b.rolling << 0.03, 0.0, 0.0, 0.0;
 
-    // The rates alone would say separation; the gate says no.
-    const double N = normalAccel(now, prev, dt,
-                                 Eigen::Vector3d(0.03, 0.0, kR),
+    // The plate alone would say separation; the gate says no.
+    const double N = normalAccel(now, Eigen::Vector3d(0.03, 0.0, kR),
                                  Eigen::Vector2d::Zero(), kG);
     ASSERT_TRUE(N < 0.0);
 
     b = stepBallContact(dyn, b, now, prev, TablePose{0, 0, 0.2121}, kR, kG, dt);
     ASSERT_TRUE(!b.airborne);
+}
+
+// ---------------------------------------------------------------------------
+// The accelerations, and why they are not a difference
+// ---------------------------------------------------------------------------
+
+// The bug this replaced, stated as the thing that must not happen again.
+//
+// `omega_dot` and `c_ddot` used to come from differencing `omega` and `c_dot`
+// across two frames.  Those rates are `(cmd - alpha) / tau` carried through the
+// Jacobian, and `cmd` is a zero-order hold: it STEPS whenever the loop changes
+// its mind.  Differencing a step gives `1/dt`, so the estimator answered a
+// command jump with a delta function — 101 rad/s^2 at the corner of a square
+// path on a thirty-second lap, where the setpoint is crawling at 24 mm/s.
+//
+// The analytic answer for the same jump is `alpha_ddot = -alpha_dot / tau`,
+// which is what a servo with a 0.05 s lag actually does, and it does not depend
+// on `dt` at all.  So: step the command, and check that the acceleration the
+// plate reports is the servo's and not the frame rate's.
+void test_a_stepped_command_is_not_an_infinite_acceleration() {
+    const TableKinematics tk(plate());
+    const double tau = 0.05;
+
+    // The legs at home, and a command 5 degrees away on one of them — the size
+    // of jump a corner produces.  Nothing has moved yet, so this is the frame
+    // the step arrives on.
+    const double home = M_PI / 4.0;
+    const std::array<double, 3> alpha = {home, home, home};
+    const std::array<double, 3> cmd = {home + 5.0 * kDeg, home, home};
+    std::array<double, 3> adot{};
+    for (int i = 0; i < 3; ++i) adot[i] = (cmd[i] - alpha[i]) / tau;
+
+    const TablePose pose = tk.home_pose(home);
+    const std::array<double, 3> addot = servoAccel(adot, tau);
+    for (int i = 0; i < 3; ++i) ASSERT_NEAR(addot[i], -adot[i] / tau, 1e-15);
+
+    // Two frame rates, and the acceleration is the same at both.  A difference
+    // could not manage that: it would double when `dt` halved.
+    const PlateMotion prev = plateMotion(tk, pose, alpha, {0.0, 0.0, 0.0});
+    const PlateMotion slow =
+        plateMotion(tk, pose, alpha, adot, addot, &prev, 1.0 / 60.0);
+    const PlateMotion fast =
+        plateMotion(tk, pose, alpha, adot, addot, &prev, 1.0 / 240.0);
+    ASSERT_NEAR(slow.omega_dot.norm(), fast.omega_dot.norm(), 1e-9);
+    ASSERT_NEAR(slow.c_ddot(2), fast.c_ddot(2), 1e-9);
+
+    // And it is the servo's own number.  With the legs still at home, the
+    // acceleration is `J_v alpha_ddot = -J_v alpha_dot / tau`, which is exactly
+    // `-omega / tau`: 0.82 rad/s of plate rate through a 0.05 s lag is
+    // 16.5 rad/s^2, and the table drops at 2.47 m/s^2 while it tilts.
+    ASSERT_NEAR(slow.omega_dot.norm(), slow.omega.norm() / tau, 1e-9);
+    ASSERT_NEAR(slow.omega_dot.norm(), 16.455, 1e-3);
+    ASSERT_NEAR(slow.c_ddot(2), -2.468, 1e-3);
+
+    // **And the size of the old error, exactly.**  On the frame a command
+    // steps, `omega` goes from nothing to its full value, so differencing it
+    // reports `|omega| / dt` against the true `|omega| / tau` — an overstatement
+    // by `tau / dt`, which is 3x at 60 Hz and 12x at 240.  It is not noise that
+    // averages out and it does not shrink with a finer step; it grows.
+    ASSERT_NEAR(slow.omega.norm() / (1.0 / 60.0),
+                slow.omega_dot.norm() * tau * 60.0, 1e-9);
+    ASSERT_NEAR(slow.omega.norm() / (1.0 / 240.0),
+                slow.omega_dot.norm() * tau * 240.0, 1e-9);
+}
+
+// The analytic answer, checked against a finite difference where a finite
+// difference is actually trustworthy.
+//
+// The whole argument for going analytic is that the leg command steps, and a
+// difference cannot differentiate a step.  Drive the legs with a SMOOTH
+// sinusoid instead — no steps anywhere — and the two must agree, or the
+// analytic expression is simply wrong.
+//
+// It also shows the two differenced terms are not optional.  `J_v` and `A` are
+// themselves changing as the plate moves, and dropping their rates gets
+// `omega_dot` wrong by 13% and `c_ddot` wrong in SIGN.
+void test_the_analytic_acceleration_matches_a_difference_where_one_is_valid() {
+    const TableKinematics tk(plate());
+    const double home = M_PI / 4.0, w = 3.0, amp = 6.0 * kDeg;
+    auto leg      = [&](double t, int i) { return home + amp * std::sin(w * t + i * 2.094); };
+    auto leg_dot  = [&](double t, int i) { return amp * w * std::cos(w * t + i * 2.094); };
+    auto leg_ddot = [&](double t, int i) { return -amp * w * w * std::sin(w * t + i * 2.094); };
+
+    // March the pose seed forward so `solve_pose` stays on the right branch —
+    // the constraint equations have a second root with the table folded flat
+    // (#22), and a cold seed at t0 can land on it.
+    TablePose seed = tk.home_pose(home);
+    auto motion_at = [&](double t, const PlateMotion* prev, double dt) {
+        const std::array<double, 3> a{leg(t, 0), leg(t, 1), leg(t, 2)};
+        const std::array<double, 3> ad{leg_dot(t, 0), leg_dot(t, 1), leg_dot(t, 2)};
+        const std::array<double, 3> add{leg_ddot(t, 0), leg_ddot(t, 1), leg_ddot(t, 2)};
+        const FKResult fk = tk.solve_pose(a, seed);
+        seed = fk.pose;
+        return plateMotion(tk, fk.pose, a, ad, add, prev, dt);
+    };
+    for (double t = 0.0; t < 0.5; t += 1.0 / 600.0) motion_at(t, nullptr, 0.0);
+
+    const double t0 = 0.5, h = 1e-5;
+    const TablePose at_t0 = seed;
+    const PlateMotion before = (seed = at_t0, motion_at(t0 - h, nullptr, 0.0));
+    const PlateMotion after  = (seed = at_t0, motion_at(t0 + h, nullptr, 0.0));
+    const Eigen::Vector3d omega_dot_fd = (after.omega - before.omega) / (2.0 * h);
+    const Eigen::Vector3d c_ddot_fd = (after.c_dot - before.c_dot) / (2.0 * h);
+
+    seed = at_t0;
+    const PlateMotion prev = motion_at(t0 - 1.0 / 600.0, nullptr, 0.0);
+    seed = at_t0;
+    const PlateMotion now = motion_at(t0, &prev, 1.0 / 600.0);
+
+    for (int i = 0; i < 3; ++i) ASSERT_NEAR(now.omega_dot(i), omega_dot_fd(i), 2e-3);
+    ASSERT_NEAR(now.c_ddot(2), c_ddot_fd(2), 2e-3);
+
+    // And the same numbers with `prev` withheld, which drops the `J_v` and `A`
+    // rate terms: 0.617 against the true 0.546, and a `c_ddot` of +0.017 where
+    // the truth is -0.006.  Small absolute numbers, but the sign of the heave is
+    // the sign of whether the plate is pressing the ball or leaving it.
+    seed = at_t0;
+    const PlateMotion partial = motion_at(t0, nullptr, 0.0);
+    ASSERT_TRUE(std::abs(partial.omega_dot(1) - omega_dot_fd(1)) > 0.05);
+    ASSERT_TRUE(partial.c_ddot(2) * c_ddot_fd(2) < 0.0);
+}
+
+// A plate whose legs are moving at a CONSTANT rate has no acceleration to
+// speak of — `alpha_ddot = -alpha_dot / tau` is what a lag does when it is
+// chasing, and a leg already at its commanded angle is not.
+void test_legs_at_their_command_produce_no_acceleration() {
+    const TableKinematics tk(plate());
+    const double home = M_PI / 4.0;
+    const std::array<double, 3> alpha = {home, home, home};
+    const TablePose pose = tk.home_pose(home);
+
+    const PlateMotion m = plateMotion(tk, pose, alpha, {0.0, 0.0, 0.0},
+                                      servoAccel({0.0, 0.0, 0.0}, 0.05));
+    ASSERT_NEAR(m.omega.norm(), 0.0, 1e-12);
+    ASSERT_NEAR(m.omega_dot.norm(), 0.0, 1e-12);
+    ASSERT_NEAR(m.c_ddot.norm(), 0.0, 1e-12);
+    ASSERT_NEAR(normalAccel(m, Eigen::Vector3d(0.05, 0.0, kR),
+                            Eigen::Vector2d::Zero(), 9.81),
+                9.81, 1e-9);
 }
 
 // The threshold is the application's own "Poor" line, not a second opinion.
@@ -395,6 +526,9 @@ int main() {
     test_untrustworthy_rates_never_separate_the_ball();
     test_a_trustworthy_frame_after_an_untrusted_one_still_declines();
     test_the_trust_threshold_is_the_condition_number_the_app_shows();
+    test_a_stepped_command_is_not_an_infinite_acceleration();
+    test_legs_at_their_command_produce_no_acceleration();
+    test_the_analytic_acceleration_matches_a_difference_where_one_is_valid();
     std::printf("test_ball_contact: all passed\n");
     return 0;
 }

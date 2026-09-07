@@ -11,10 +11,20 @@ Eigen::Vector3d vee(const Eigen::Matrix3d& S) {
 
 }  // namespace
 
+std::array<double, 3> servoAccel(const std::array<double, 3>& alpha_dot_rad_s,
+                                 double tau) {
+    if (tau <= 0.0) return {0.0, 0.0, 0.0};
+    return {-alpha_dot_rad_s[0] / tau, -alpha_dot_rad_s[1] / tau,
+            -alpha_dot_rad_s[2] / tau};
+}
+
 PlateMotion plateMotion(const TableKinematics& tk,
                         const TablePose& pose,
                         const std::array<double, 3>& alpha_rad,
-                        const std::array<double, 3>& alpha_dot_rad_s) {
+                        const std::array<double, 3>& alpha_dot_rad_s,
+                        const std::array<double, 3>& alpha_ddot_rad_s2,
+                        const PlateMotion* prev,
+                        double dt) {
     PlateMotion m;
     m.R = tk.table_rotation(pose.phi, pose.theta);
     m.c = Eigen::Vector3d(0.0, 0.0, pose.z_c);
@@ -22,45 +32,54 @@ PlateMotion plateMotion(const TableKinematics& tk,
     // d(pose)/dt = J_v * d(alpha)/dt, with pose = (phi, theta, z_c).
     const Eigen::Vector3d alpha_dot(alpha_dot_rad_s[0], alpha_dot_rad_s[1],
                                     alpha_dot_rad_s[2]);
-    const Eigen::Vector3d pose_dot = tk.velocity_jacobian(alpha_rad, pose) * alpha_dot;
-
+    const Eigen::Vector3d alpha_ddot(alpha_ddot_rad_s2[0], alpha_ddot_rad_s2[1],
+                                     alpha_ddot_rad_s2[2]);
+    m.J_v = tk.velocity_jacobian(alpha_rad, pose);
+    const Eigen::Vector3d pose_dot = m.J_v * alpha_dot;
     m.c_dot = Eigen::Vector3d(0.0, 0.0, pose_dot(2));
 
-    // omega from R_dot R^T, which is exact given an exact R_dot.  Cheaper and
-    // less error-prone than writing the angular velocity of an Ry*Rx sequence
-    // out by hand, and it cannot disagree with the rotation actually used.
-    const Eigen::Matrix3d R_dot =
-        tk.table_rotation_dot(pose.phi, pose.theta, pose_dot(0), pose_dot(1));
-    m.omega = vee(R_dot * m.R.transpose());
+    // omega is LINEAR in the tilt rates, so it factors as `A(pose) * (phi_dot,
+    // theta_dot)` and the map can be read off by evaluating it at the two unit
+    // rates.  Extracting it costs two rotation derivatives and buys the second
+    // derivative below: differentiating a product of a smooth matrix and a
+    // discontinuous vector is only possible once they are separated.
+    m.A.col(0) = vee(tk.table_rotation_dot(pose.phi, pose.theta, 1.0, 0.0) *
+                     m.R.transpose());
+    m.A.col(1) = vee(tk.table_rotation_dot(pose.phi, pose.theta, 0.0, 1.0) *
+                     m.R.transpose());
+    m.omega = m.A * pose_dot.head<2>();
+
+    // pose_ddot = J_v alpha_ddot + J_v_dot alpha_dot, and omega_dot the same
+    // shape one level up.  The analytic halves carry the command step; the
+    // differenced halves carry only how the geometry itself is changing, which
+    // is continuous because the leg angles and the pose are.
+    Eigen::Vector3d pose_ddot = m.J_v * alpha_ddot;
+    if (prev != nullptr && dt > 0.0)
+        pose_ddot += ((m.J_v - prev->J_v) / dt) * alpha_dot;
+    m.c_ddot = Eigen::Vector3d(0.0, 0.0, pose_ddot(2));
+
+    m.omega_dot = m.A * pose_ddot.head<2>();
+    if (prev != nullptr && dt > 0.0)
+        m.omega_dot += ((m.A - prev->A) / dt) * pose_dot.head<2>();
+
     m.rates_trustworthy =
         tk.condition_number(alpha_rad, pose) < kRatesUntrustworthyAbove;
     return m;
 }
 
-double normalAccel(const PlateMotion& now,
-                   const PlateMotion& prev,
-                   double dt,
+double normalAccel(const PlateMotion& plate,
                    const Eigen::Vector3d& s,
                    const Eigen::Vector2d& s_dot,
                    double gravity) {
-    const Eigen::Vector3d n = now.normal();
-
-    // The one finite difference, and it is of analytic rates.
-    const Eigen::Vector3d omega_dot =
-        (dt > 0.0) ? Eigen::Vector3d((now.omega - prev.omega) / dt)
-                   : Eigen::Vector3d::Zero();
-    const Eigen::Vector3d c_ddot =
-        (dt > 0.0) ? Eigen::Vector3d((now.c_dot - prev.c_dot) / dt)
-                   : Eigen::Vector3d::Zero();
-
-    const Eigen::Vector3d r_world = now.R * s;              // centre, from the table centre
-    const Eigen::Vector3d v_world = now.R * Eigen::Vector3d(s_dot(0), s_dot(1), 0.0);
+    const Eigen::Vector3d n = plate.normal();
+    const Eigen::Vector3d r_world = plate.R * s;            // centre, from the table centre
+    const Eigen::Vector3d v_world = plate.R * Eigen::Vector3d(s_dot(0), s_dot(1), 0.0);
 
     const double gravity_share = gravity * n.z();
-    const double heave = n.dot(c_ddot);
-    const double angular = n.dot(omega_dot.cross(r_world) +
-                                 now.omega.cross(now.omega.cross(r_world)));
-    const double coriolis = 2.0 * n.dot(now.omega.cross(v_world));
+    const double heave = n.dot(plate.c_ddot);
+    const double angular = n.dot(plate.omega_dot.cross(r_world) +
+                                 plate.omega.cross(plate.omega.cross(r_world)));
+    const double coriolis = 2.0 * n.dot(plate.omega.cross(v_world));
 
     return gravity_share + heave + angular + coriolis;
 }
@@ -125,18 +144,20 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
         // conservative answer and the honest one: the ball was on the plate a
         // moment ago and nothing believable says it left.
         //
-        // BOTH frames have to be trustworthy, not just this one: `normalAccel`
-        // reaches the acceleration by differencing `now` against `prev`, so a
-        // believable frame differenced against a garbage one is a garbage
-        // acceleration.  Guarding only `now` would let the first good frame on
-        // the way out of a singularity report a separation built entirely from
-        // the rates the guard exists to refuse.
+        // BOTH frames have to be trustworthy, not just this one.  `now`'s
+        // accelerations are analytic in the servo lag but still carry a
+        // differenced term — how `J_v` and `A` are themselves changing — and
+        // `J_v` is `-J_pose^-1 J_alpha`, the very thing that blows up near a
+        // singularity.  So a believable frame differenced against a garbage one
+        // is still a garbage acceleration, and guarding only `now` would let
+        // the first good frame on the way out of a singularity report a
+        // separation built entirely from the rates the guard exists to refuse.
         if (!now.rates_trustworthy || !prev.rates_trustworthy) {
             out.rolling = stepBall(dynamics, out.rolling, pose,
                                    quasiStaticNormalAccel(now, gravity), dt);
             return out;
         }
-        const double N = normalAccel(now, prev, dt,
+        const double N = normalAccel(now,
                                      Eigen::Vector3d(out.rolling(0), out.rolling(1),
                                                      ball_radius),
                                      Eigen::Vector2d(out.rolling(2), out.rolling(3)),
