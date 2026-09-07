@@ -390,7 +390,9 @@ void PlateView::step(GLFWwindow* window, float dt) {
             alpha_dot[i] = (cmd_rad[i] - alpha_now[i]) / design_.servo_tau;
     }
     plate_motion_prev_ = plate_motion_;
-    plate_motion_ = plateMotion(tk_, pose_, alpha_now, alpha_dot);
+    plate_motion_ = plateMotion(tk_, pose_, alpha_now, alpha_dot,
+                                servoAccel(alpha_dot, design_.servo_tau),
+                                &plate_motion_prev_, dt);
 
     // --- Ball ---
     if (ball_enabled_ && ball_on_plate_) {

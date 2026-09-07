@@ -207,7 +207,8 @@ DemoRun runDemo(const ModelEntry& e, const Eigen::MatrixXd& K,
         const FKResult fk = tk.solve_pose(alpha, pose);
         if (fk.converged) pose = fk.pose;
         pm_prev = pm;
-        pm = plateMotion(tk, pose, alpha, adot);
+        pm = plateMotion(tk, pose, alpha, adot,
+                         servoAccel(adot, d.servo_tau), &pm_prev, dt);
 
         ball = stepBallContact(dynamics, ball, pm, pm_prev, pose,
                                kBallRadius, g, dt);
@@ -430,7 +431,8 @@ Sweep sweepOneDirection(const ModelEntry& e, const Eigen::MatrixXd& K,
         ASSERT_TRUE(fk.converged);
         pose = fk.pose;
         pm_prev = pm;
-        pm = plateMotion(tk, pose, alpha, adot);
+        pm = plateMotion(tk, pose, alpha, adot,
+                         servoAccel(adot, d.servo_tau), &pm_prev, dt);
         ball = stepBallContact(dynamics, ball, pm, pm_prev, pose,
                                kBallRadius, g, dt);
         if (ball.airborne) sw.separated = true;
@@ -585,7 +587,8 @@ void test_an_over_aggressive_tuning_throws_the_ball_off() {
             const FKResult fk = tk.solve_pose(alpha, pose);
             if (fk.converged) pose = fk.pose;
             pm_prev = pm;
-            pm = plateMotion(tk, pose, alpha, adot);
+            pm = plateMotion(tk, pose, alpha, adot,
+                         servoAccel(adot, d.servo_tau), &pm_prev, dt);
             ball = stepBallContact(dynamics, ball, pm, pm_prev, pose,
                                    kBallRadius, g, dt);
             const Eigen::Matrix<double, 6, 1> now = plateFrame(ball, pm, kBallRadius);
