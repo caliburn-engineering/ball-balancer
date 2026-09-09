@@ -31,7 +31,7 @@ namespace {
 
 constexpr double kDeg = M_PI / 180.0;
 
-TableParams cascadePlate() {
+TableParams cascadeTable() {
     return cascadeMechanism(cascadeModel(getBuiltinModels()).params);
 }
 
@@ -43,7 +43,7 @@ std::array<double, 3> all(double deg) {
 // memory.  If a future parameter change stops `z_c = 0` being a root, this
 // test fails and the guard below can be reconsidered — which is the point.
 void test_the_folded_pose_is_an_exact_root() {
-    const TableKinematics tk(cascadePlate());
+    const TableKinematics tk(cascadeTable());
     for (double deg : {10.0, 30.0, 45.0, 60.0, 80.0}) {
         const Eigen::Vector3d f = tk.fk_residual(all(deg), TablePose{0.0, 0.0, 0.0});
         ASSERT_TRUE(f.norm() < 1e-12);
@@ -54,7 +54,7 @@ void test_the_folded_pose_is_an_exact_root() {
 // them.  The folded assembly is exactly one pose, the same at every servo
 // angle, which is what lets the floor below be placed so generously.
 void test_the_folded_assembly_is_one_pose_at_every_angle() {
-    const TableKinematics tk(cascadePlate());
+    const TableKinematics tk(cascadeTable());
     for (double deg : {10.0, 30.0, 45.0, 60.0, 80.0}) {
         const FKResult folded = tk.forward_kinematics(all(deg), TablePose{0, 0, 0});
         ASSERT_TRUE(folded.converged);
@@ -72,7 +72,7 @@ void test_the_folded_assembly_is_one_pose_at_every_angle() {
 // from zero to reach it at all.  The thin low tail is the point of the
 // assertion: it is what stops the floor being raised on a hunch.
 void test_the_floor_separates_the_two_assemblies() {
-    const TableParams tp = cascadePlate();
+    const TableParams tp = cascadeTable();
     const TableKinematics tk(tp);
     std::mt19937 rng(7);
     std::uniform_real_distribution<double> U(tp.alpha_min, tp.alpha_max);
@@ -105,7 +105,7 @@ void test_the_floor_separates_the_two_assemblies() {
 // must climb back to the assembly the machine is built in.  Plain
 // `forward_kinematics` does not, and cannot — it is a solver, not a mechanism.
 void test_solve_pose_recovers_from_a_folded_seed() {
-    const TableKinematics tk(cascadePlate());
+    const TableKinematics tk(cascadeTable());
     const std::array<double, 3> a = all(45.0);
     const TablePose folded{0.0, 0.0, 0.0};
 
@@ -122,7 +122,7 @@ void test_solve_pose_recovers_from_a_folded_seed() {
 // a pose that was already a root, so Newton returned it in one iteration.
 // Sixty seconds of that is what a visitor was seeing.
 void test_a_folded_pose_does_not_persist_across_frames() {
-    const TableKinematics tk(cascadePlate());
+    const TableKinematics tk(cascadeTable());
     TablePose seed{0.0, 0.0, 0.0};
     for (int frame = 0; frame < 600; ++frame) {
         const FKResult fk = tk.solve_pose(all(45.0), seed);
@@ -138,7 +138,7 @@ void test_a_folded_pose_does_not_persist_across_frames() {
 // caller's answer is to keep the pose it had — a mechanism driven into a
 // singularity binds and stops, it does not lie flat.
 void test_an_unreachable_triple_fails_rather_than_folding() {
-    const TableParams tp = cascadePlate();
+    const TableParams tp = cascadeTable();
     const TableKinematics tk(tp);
     // Found by sweeping: the servo box is roughly half reachable, and the
     // extremes of it are not.
@@ -158,7 +158,7 @@ void test_an_unreachable_triple_fails_rather_than_folding() {
 // its ends are inside it.  Clipping the command alone left two kick
 // directions in every 360 with one frame, mid-flight, that had no assembly.
 void test_the_servo_path_stays_inside_the_workspace() {
-    const TableParams tp = cascadePlate();
+    const TableParams tp = cascadeTable();
     const TableKinematics tk(tp);
 
     // A command that IS assemblable, from legs that are, but far enough away
@@ -178,7 +178,7 @@ void test_the_servo_path_stays_inside_the_workspace() {
 
 // And the retreat reports a broken precondition rather than freezing quietly.
 void test_a_retreat_from_an_unassemblable_safe_end_says_so() {
-    const TableParams tp = cascadePlate();
+    const TableParams tp = cascadeTable();
     const TableKinematics tk(tp);
 
     const std::array<double, 3> nowhere = {80.0 * kDeg, 10.0 * kDeg, 80.0 * kDeg};

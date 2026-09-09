@@ -66,10 +66,12 @@ OrbitCamera defaultCamera() {
 // on the moon must be refused, not quietly run on Earth.
 constexpr double kGravity = 9.81;
 
-RollingBallDynamics ballDynamicsFor(const TableParams& table) {
-    PlateParams plate{table.R_table, kGravity};
-    return RollingBallDynamics(kPlateBall, plate);
-}
+// Where this plate's legs sit at rest: what a reset returns to, and what the
+// Home button commands.  Not yet the only 45 in this file — the animation
+// swings about it and the command array is initialised to it, both of which
+// are literals still.
+constexpr double kHomeLegDeg = 45.0;
+constexpr double kHomeLegRad = kHomeLegDeg * kDeg;
 
 // The scroll wheel is the one input this class cannot read by polling: GLFW
 // only delivers it as an event.  One instance drives the app, so a file-scope
@@ -86,10 +88,10 @@ void scrollCallback(GLFWwindow*, double, double yoffset) {
 }  // namespace
 
 PlateView::PlateView()
-    // tk_ is declared first, so its params are live here: the ball's plate and
-      // the drawn plate are one object, not two that have to be kept in step.
-    : tk_(defaultTableParams()),
-      ball_dynamics_(ballDynamicsFor(tk_.params())),
+    // plate_ is declared first, so its params are live here: the ball's plate
+      // and the drawn plate are one object, not two that have to be kept in
+      // step.  It is also exactly what every test harness runs against.
+    : plate_(defaultTableParams(), kGravity),
       plot_state_(kBufSize),
       s_phi_("\xcf\x86", kBufSize),                 // phi
       s_theta_("\xce\xb8", kBufSize),               // theta
@@ -105,23 +107,21 @@ PlateView::PlateView()
       s_ey_("y", kBufSize) {
     camera_ = defaultCamera();
 
-    home_ = tk_.home_pose();
-    pose_ = home_;
-
-    // Both frames of plate motion, so the first contact test differences two
-    // real instants rather than one real one and a default-constructed zero —
-    // which would read as the plate having just been dropped.
-    plate_motion_ = plateMotion(tk_, pose_, legsRad(), {0.0, 0.0, 0.0});
-    plate_motion_prev_ = plate_motion_;
-
-    // The opening frame: the ball already on a circle and already moving
+    // The legs at home, the plate assembled there, and BOTH frames of plate
+    // motion filled in — so the first contact test differences two real
+    // instants rather than one real one and a default-constructed zero, which
+    // would read as the plate having just been dropped.  `simStart` is where
+    // that rule lives now, so a harness cannot start from a plate the
+    // application never starts from.
+    //
+    // The opening frame has the ball already on a circle and already moving
     // along it, so the first frame that draws is a frame of the demo working
     // rather than a frame of it starting up.  Both errors are zero here, which
     // is what keeps the legs still — see `attract_mode.h`.
     path_ = openingPath();
     path_radius_mm_ = static_cast<float>(path_.radius_m * 1000.0);
     path_period_s_ = static_cast<float>(path_.period_s);
-    ball_.rolling = attractStart(path_);
+    sim_ = simStart(plate_, kHomeLegRad, attractStart(path_));
 
     plots_ = {
         {"Ball Position [mm]", {&s_bx_, &s_by_}, 0},
@@ -164,18 +164,13 @@ void PlateView::commandAllServos(float degrees) {
     for (int i = 0; i < 3; ++i) alpha_cmd_deg_[i] = degrees;
 }
 
-void PlateView::snapServos(float degrees) {
-    commandAllServos(degrees);
-    for (int i = 0; i < 3; ++i) alpha_deg_[i] = degrees;
-}
-
-std::array<double, 3> PlateView::legsRad() const {
-    return {alpha_deg_[0] * kDeg, alpha_deg_[1] * kDeg, alpha_deg_[2] * kDeg};
+float PlateView::legDeg(int i) const {
+    return static_cast<float>(sim_.alpha_rad[i] / kDeg);
 }
 
 bool PlateView::designUsable() const {
     return design_offered_ && gainFitsCascade(design_) &&
-           samePlant(design_.mechanism, design_.gravity, tk_.params(), kGravity);
+           samePlant(design_.mechanism, design_.gravity, kinematics().params(), kGravity);
 }
 
 bool PlateView::loopDriving() const {
@@ -223,20 +218,26 @@ void PlateView::setDesign(const AutoBalanceDesign& d, bool offered,
 }
 
 void PlateView::resetBall() {
-    ball_ = BallState{};
+    sim_.ball = BallState{};
     ball_on_plate_ = true;
 }
 
 void PlateView::resetAll() {
-    snapServos(45.0f);
+    // The whole simulation back to its start state, through the one function
+    // that knows what a start state is — legs at home, the plate assembled
+    // there, and both frames of plate motion seeded.  Reset used to leave the
+    // previous frame's plate motion behind, so the frame after a reset
+    // differenced a moving plate against a still one.
+    sim_ = simStart(plate_, kHomeLegRad);
+    commandAllServos(static_cast<float>(kHomeLegDeg));
     animate_ = false;
     balance_engaged_ = false;
     balance_saturated_ = false;
     balance_clipped_ = false;
+    report_ = SimReport{};
     sp_x_mm_ = 0.0f;
     sp_y_mm_ = 0.0f;
     anim_time_ = 0.0f;
-    home_ = tk_.home_pose();
     camera_ = defaultCamera();
     plot_state_.clear();
     plot_state_.paused = false;
@@ -245,8 +246,7 @@ void PlateView::resetAll() {
             s->data.clear();
     plot_state_.markers.clear();
     sim_time_ = 0.0f;
-    path_phase_ = 0.0;
-    resetBall();
+    ball_on_plate_ = true;
 }
 
 void PlateView::step(GLFWwindow* window, float dt) {
@@ -272,148 +272,101 @@ void PlateView::step(GLFWwindow* window, float dt) {
 
     if (plot_state_.paused) return;
 
-    // --- Where the leg commands come from ---
+    // --- One step, the same one every harness runs ---
+    //
+    // Everything causal happens inside `stepSim`: the setpoint moves, the loop
+    // reads the legs where they ARE and the ball where it IS, the servos
+    // follow, the mechanism is solved, the plate's motion is assembled and the
+    // ball decides whether it is still on it.  This function's remaining job
+    // is to say what the plate is being ASKED for and to draw what came back.
+    //
+    // It used to carry its own copy of that order, and so did four test
+    // harnesses.  See `sim_step.h` and #30.
+    SimInput in;
+    in.dt = dt;
+    in.design = design_;
+    in.closed_loop = loopDriving();
+    in.ball_enabled = ball_enabled_ && ball_on_plate_;
+
+    // --- Where the leg commands come from, while the loop is not driving ---
     //
     // Three writers, one array, in strict precedence: the closed loop, then
-    // the animation, then whatever the sliders last left there.  The
-    // controller reads the legs where they ARE and the ball where it IS, and
-    // the servos move afterwards — the same causal order the closed-loop test
-    // runs, which is what makes that test evidence about this code.
-    const std::array<double, 3> alpha_rad = legsRad();
-
-    // --- The setpoint, where a path owns it ---
-    // Driven before the loop reads it, so the gain sees this frame's target
-    // rather than last frame's.
-    //
-    // `stepPath` owns the order — the setpoint is read at the phase this frame
-    // opened on and the phase advances afterwards, so that the position here
-    // and the velocity handed to the loop below are the same instant.  Kept
-    // there rather than here so that the tests exercise this rule rather than
-    // their own copy of it.
-    PathStep path_step{};
-    if (path_.shape != PathShape::Fixed) {
-        path_.radius_m = path_radius_mm_ * 1e-3;
-        path_.period_s = path_period_s_;
-        path_step = stepPath(path_, path_phase_, dt);
-        sp_x_mm_ = static_cast<float>(path_step.point(0) * 1000.0);
-        sp_y_mm_ = static_cast<float>(path_step.point(1) * 1000.0);
-        path_phase_ = path_step.next_phase;
-    }
-
-    if (loopDriving()) {
-        // What the gain is shown.  While the ball is on the plate this is just
-        // the ball.  While it is in the air the plate cannot touch it, so
-        // regulating where it IS steers on a quantity nothing can move — the
-        // loop is given where it will LAND instead, and spends the flight
-        // getting underneath it.  The velocity handed over is zeroed with it:
-        // the ball's present velocity is what carries it to that point, and
-        // feeding both would ask the plate to cancel a motion it has already
-        // accounted for.
-        const Eigen::Matrix<double, 6, 1> bp =
-            plateFrame(ball_, plate_motion_, kBallRadius);
-        Eigen::Vector4d seen(bp(0), bp(1), bp(3), bp(4));
-        BallReference ref;
-        ref.position = Eigen::Vector2d(sp_x_mm_ * 1e-3, sp_y_mm_ * 1e-3);
-        if (ball_.airborne) {
-            const Eigen::Vector2d land =
-                predictedLanding(bp, kBallRadius, kGravity);
-            seen << land(0), land(1), 0.0, 0.0;
-            // The reference velocity stays zero with it, for the same reason:
-            // the ball's own velocity is what carries it to that landing
-            // point, and asking the plate to match the path's speed as well
-            // would be asking it to cancel a motion already accounted for.
-        } else {
-            // The path's own velocity, handed to the loop as the velocity the
-            // setpoint has — zero under a fixed setpoint, which is what
-            // `stepPath` already returns for one.  `BallReference` carries what
-            // it buys and why it has no gain of its own.
-            ref.velocity = path_step.velocity;
-        }
-        const LegCommand c = legCommand(tk_, design_, alpha_rad, seen, ref);
-        balance_saturated_ = c.saturated;
-        balance_clipped_ = c.clipped_to_workspace;
-        for (int i = 0; i < 3; ++i)
-            alpha_cmd_deg_[i] = static_cast<float>(c.alpha_rad[i] / kDeg);
-    } else if (animate_) {
-        balance_saturated_ = false;
-        balance_clipped_ = false;
+    // the animation, then whatever the sliders last left there.  The first is
+    // `in.closed_loop`; the other two write the open-loop command below.
+    if (!in.closed_loop && animate_) {
         anim_time_ += dt * anim_speed_;
         const float amp = anim_amplitude_;
         const float w = 2.0f * static_cast<float>(M_PI) * 0.5f * anim_time_;
         alpha_cmd_deg_[0] = 45.0f + amp * std::sin(w);
         alpha_cmd_deg_[1] = 45.0f + amp * std::sin(w + 2.0f * static_cast<float>(M_PI) / 3.0f);
         alpha_cmd_deg_[2] = 45.0f + amp * std::sin(w + 4.0f * static_cast<float>(M_PI) / 3.0f);
-    } else {
-        balance_saturated_ = false;
-        balance_clipped_ = false;
     }
+    for (int i = 0; i < 3; ++i)
+        in.open_loop_cmd_rad[i] = alpha_cmd_deg_[i] * kDeg;
+
+    // --- The setpoint, and who owns it ---
+    //
+    // A path writes `sp_x_mm_` / `sp_y_mm_` rather than going round them, so
+    // the sliders keep working as the readout of where the ball is being sent.
+    // A held setpoint is the sliders' own value handed back down.  Which of
+    // the two it is, and the read-then-advance rule that goes with a path, are
+    // both inside the step.
+    if (path_.shape != PathShape::Fixed) {
+        path_.radius_m = path_radius_mm_ * 1e-3;
+        path_.period_s = path_period_s_;
+    }
+    in.path = path_;
+    in.held_setpoint = Eigen::Vector2d(sp_x_mm_ * 1e-3, sp_y_mm_ * 1e-3);
+
+    report_ = stepSim(plate_, in, sim_);
     sim_time_ += dt;
 
-    // --- Servos ---
-    const std::array<double, 3> cmd_rad = {
-        alpha_cmd_deg_[0] * kDeg, alpha_cmd_deg_[1] * kDeg, alpha_cmd_deg_[2] * kDeg};
-    const std::array<double, 3> next =
-        stepServosOnPlate(tk_, alpha_rad, cmd_rad, design_.servo_tau, dt);
-    for (int i = 0; i < 3; ++i)
-        alpha_deg_[i] = static_cast<float>(next[i] / kDeg);
-
-    // --- Kinematics ---
-    const std::array<double, 3> alpha_now = legsRad();
-
-    // `solve_pose`, not `forward_kinematics`: the constraint equations have a
-    // second root with the table folded flat on the base, and the retry this
-    // used to do tested only convergence — which the folded root passes, with
-    // a residual of 1e-11, in one iteration.  Once the pose fell onto it the
-    // next frame was seeded from it and the plate stayed flat for the rest of
-    // the session.  See issue #22.
-    fk_result_ = tk_.solve_pose(alpha_now, home_);
-
-    // The pose is adopted only on success.  Before, it was assigned whatever
-    // the solver last held even when that solve had failed — so a leg triple
-    // with no assembly at all still moved the plate, using a pose that solved
-    // nothing.  Keeping the previous one is what a mechanism does when it is
-    // driven into a singularity: it binds and stops.
-    if (fk_result_.converged) {
-        pose_ = fk_result_.pose;
-        home_ = fk_result_.pose;
-    }
-    condition_num_ = tk_.condition_number(alpha_now, pose_);
-    manipulability_ = tk_.manipulability(alpha_now, pose_);
-
-    // --- Plate motion, for the contact test ---
-    // The legs' rate is the servo lag's own derivative rather than a
-    // difference: `alpha_dot = (cmd - alpha) / tau` is exactly what the model
-    // says they are doing, and it costs nothing to ask it.
-    std::array<double, 3> alpha_dot{};
-    if (design_.servo_tau > 0.0) {
+    // --- What came back ---
+    //
+    // Both badges and the slider read-out belong to the loop, so they are set
+    // together.  `stepSim` already reports neither complaint while the loop is
+    // not driving — nobody asked the gain for anything — so this does not have
+    // to clear them, only decline to echo a command the sliders themselves
+    // wrote.  Echoing that back would hand them their own value through two
+    // float conversions, every frame, forever.
+    if (in.closed_loop) {
+        balance_saturated_ = report_.saturated;
+        balance_clipped_ = report_.clipped;
         for (int i = 0; i < 3; ++i)
-            alpha_dot[i] = (cmd_rad[i] - alpha_now[i]) / design_.servo_tau;
+            alpha_cmd_deg_[i] = static_cast<float>(report_.cmd_rad[i] / kDeg);
     }
-    plate_motion_prev_ = plate_motion_;
-    plate_motion_ = plateMotion(tk_, pose_, alpha_now, alpha_dot,
-                                servoAccel(alpha_dot, design_.servo_tau),
-                                &plate_motion_prev_, dt);
 
-    // --- Ball ---
-    if (ball_enabled_ && ball_on_plate_) {
-        ball_ = stepBallContact(ball_dynamics_, ball_, plate_motion_,
-                                plate_motion_prev_, pose_, kBallRadius,
-                                kGravity, dt);
-        if (ball_.airborne) airborne_flash_s_ = 1.5f;
+    // And the setpoint, where a path owns it.  A held setpoint is the
+    // sliders' and is left alone for the same reason.
+    if (path_.shape != PathShape::Fixed) {
+        sp_x_mm_ = static_cast<float>(report_.setpoint(0) * 1000.0);
+        sp_y_mm_ = static_cast<float>(report_.setpoint(1) * 1000.0);
+    }
+
+    condition_num_ = kinematics().condition_number(sim_.alpha_rad, sim_.pose);
+    manipulability_ = kinematics().manipulability(sim_.alpha_rad, sim_.pose);
+
+    // Only while the ball is being simulated, as before: with the simulation
+    // off the last reading is what the panel goes on showing, and the contact
+    // line is one of the readings.
+    if (in.ball_enabled) {
+        if (report_.airborne) airborne_flash_s_ = 1.5f;
         else airborne_flash_s_ = std::max(0.0f, airborne_flash_s_ - dt);
-        const Eigen::Matrix<double, 6, 1> bp =
-            plateFrame(ball_, plate_motion_, kBallRadius);
-        if (!ballOnPlate(Eigen::Vector4d(bp(0), bp(1), bp(3), bp(4)),
-                         tk_.params().R_table, kBallRadius)) {
-            ball_on_plate_ = false;
-            if (ball_auto_reset_) resetBall();
-        }
+    }
+
+    if (report_.left_plate) {
+        ball_on_plate_ = false;
+        if (ball_auto_reset_) resetBall();
     }
 
     // --- Plots ---
+    // `report_.ball_plate` rather than a second `plateFrame` call: this is the
+    // ball the step just finished with, and asking again is how a plot comes to
+    // be drawn against a different frame's plate motion from the one the
+    // contact test used.  The draw pass below does call it, and has to — it
+    // runs whether or not a step happened this frame.
     plot_state_.push_time(sim_time_);
-    const Eigen::Matrix<double, 6, 1> bp =
-        plateFrame(ball_, plate_motion_, kBallRadius);
+    const Eigen::Matrix<double, 6, 1>& bp = report_.ball_plate;
     push_series(s_bx_,    static_cast<float>(bp(0) * 1000), plot_state_);
     push_series(s_by_,    static_cast<float>(bp(1) * 1000), plot_state_);
     // Height above the surface, not above the table centre: zero means resting
@@ -423,13 +376,13 @@ void PlateView::step(GLFWwindow* window, float dt) {
     // a positive x error means the ball is further along +x than it was told.
     push_series(s_ex_,    static_cast<float>(bp(0) * 1000) - sp_x_mm_, plot_state_);
     push_series(s_ey_,    static_cast<float>(bp(1) * 1000) - sp_y_mm_, plot_state_);
-    push_series(s_phi_,   static_cast<float>(pose_.phi / kDeg), plot_state_);
-    push_series(s_theta_, static_cast<float>(pose_.theta / kDeg), plot_state_);
-    push_series(s_a0_,    alpha_deg_[0], plot_state_);
-    push_series(s_a1_,    alpha_deg_[1], plot_state_);
-    push_series(s_a2_,    alpha_deg_[2], plot_state_);
+    push_series(s_phi_,   static_cast<float>(sim_.pose.phi / kDeg), plot_state_);
+    push_series(s_theta_, static_cast<float>(sim_.pose.theta / kDeg), plot_state_);
+    push_series(s_a0_,    legDeg(0), plot_state_);
+    push_series(s_a1_,    legDeg(1), plot_state_);
+    push_series(s_a2_,    legDeg(2), plot_state_);
     push_series(s_cond_,  static_cast<float>(condition_num_), plot_state_);
-    push_series(s_zc_,    static_cast<float>(pose_.z_c * 1000), plot_state_);
+    push_series(s_zc_,    static_cast<float>(sim_.pose.z_c * 1000), plot_state_);
 }
 
 void PlateView::drawPanels() {
@@ -454,7 +407,7 @@ void PlateView::drawControls() {
     // readings are simply the last ones taken — which is the useful thing to
     // show anyway, since they say where it went.
     const Eigen::Matrix<double, 6, 1> bp =
-        plateFrame(ball_, plate_motion_, kBallRadius);
+        plateFrame(sim_.ball, sim_.motion, kBallRadius);
     ImGui::Text("Position: %+7.1f, %+7.1f mm", bp(0) * 1000, bp(1) * 1000);
     ImGui::Text("Velocity: %+7.1f, %+7.1f mm/s", bp(3) * 1000, bp(4) * 1000);
 
@@ -465,7 +418,7 @@ void PlateView::drawControls() {
     if (!ball_on_plate_) {
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
                            "the ball has left the plate");
-    } else if (ball_.airborne) {
+    } else if (sim_.ball.airborne) {
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.15f, 1.0f),
                            "AIRBORNE  %+.1f mm, %+.0f mm/s",
                            (bp(2) - kBallRadius) * 1000, bp(5) * 1000);
@@ -478,16 +431,16 @@ void PlateView::drawControls() {
 
     if (ImGui::Button("Reset Ball")) resetBall();
     ImGui::SameLine();
-    if (ImGui::Button("Nudge +x") && !ball_.airborne) ball_.rolling(2) += ball_nudge_;
+    if (ImGui::Button("Nudge +x") && !sim_.ball.airborne) sim_.ball.rolling(2) += ball_nudge_;
     ImGui::SameLine();
-    if (ImGui::Button("Nudge +y") && !ball_.airborne) ball_.rolling(3) += ball_nudge_;
+    if (ImGui::Button("Nudge +y") && !sim_.ball.airborne) sim_.ball.rolling(3) += ball_nudge_;
     ImGui::SameLine();
     // The disturbance the loop is watched against: put the ball a fifth of the
     // plate out and let go.  A nudge tests recovery from a kick; this tests
     // recovery from a position, which is what the design surface is aimed at.
     if (ImGui::Button("Displace")) {
-        ball_ = BallState{};
-        ball_.rolling << 0.06, -0.04, 0.0, 0.0;
+        sim_.ball = BallState{};
+        sim_.ball.rolling << 0.06, -0.04, 0.0, 0.0;
         ball_on_plate_ = true;
     }
     // The top of this slider is the hardest shove the interface can offer, and
@@ -516,8 +469,8 @@ void PlateView::drawControls() {
 
     ImGui::Checkbox("Link all servos", &link_servos_);
 
-    const float a_min = static_cast<float>(tk_.params().alpha_min / kDeg);
-    const float a_max = static_cast<float>(tk_.params().alpha_max / kDeg);
+    const float a_min = static_cast<float>(kinematics().params().alpha_min / kDeg);
+    const float a_max = static_cast<float>(kinematics().params().alpha_max / kDeg);
 
     if (link_servos_) {
         if (ImGui::SliderFloat("All##servo", &alpha_cmd_deg_[0], a_min, a_max, "%.1f deg")) {
@@ -540,7 +493,7 @@ void PlateView::drawControls() {
     // The sliders are the COMMAND; the legs lag behind it.  Without this line
     // the two readouts disagree on screen with nothing saying why.
     ImGui::Text("legs at %.1f, %.1f, %.1f deg (lag \xcf\x84 = %.3f s)",
-                alpha_deg_[0], alpha_deg_[1], alpha_deg_[2], design_.servo_tau);
+                legDeg(0), legDeg(1), legDeg(2), design_.servo_tau);
 
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
@@ -573,12 +526,12 @@ void PlateView::drawControls() {
     auto ok_col = [](bool ok) {
         return ok ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) : ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
     };
-    ImGui::TextColored(ok_col(fk_result_.converged),
-                       "FK: %s (%d iter)", fk_result_.converged ? "OK" : "FAIL",
-                       fk_result_.iterations);
-    ImGui::Text("Roll:   %+.2f deg", pose_.phi / kDeg);
-    ImGui::Text("Pitch:  %+.2f deg", pose_.theta / kDeg);
-    ImGui::Text("Heave:  %.1f mm",   pose_.z_c * 1000);
+    ImGui::TextColored(ok_col(report_.fk.converged),
+                       "FK: %s (%d iter)", report_.fk.converged ? "OK" : "FAIL",
+                       report_.fk.iterations);
+    ImGui::Text("Roll:   %+.2f deg", sim_.pose.phi / kDeg);
+    ImGui::Text("Pitch:  %+.2f deg", sim_.pose.theta / kDeg);
+    ImGui::Text("Heave:  %.1f mm",   sim_.pose.z_c * 1000);
 
     // --- Jacobian ---
     ImGui::SeparatorText("Jacobian Analysis");
@@ -613,7 +566,7 @@ void PlateView::drawControls() {
 
     // --- Velocity Jacobian (collapsed) ---
     if (ImGui::CollapsingHeader("Velocity Jacobian")) {
-        const Eigen::Matrix3d Jv = tk_.velocity_jacobian(legsRad(), pose_);
+        const Eigen::Matrix3d Jv = kinematics().velocity_jacobian(legsRad(), sim_.pose);
         ImGui::Text("        servo0    servo1    servo2");
         ImGui::Text("roll   %+.4f   %+.4f   %+.4f", Jv(0,0), Jv(0,1), Jv(0,2));
         ImGui::Text("pitch  %+.4f   %+.4f   %+.4f", Jv(1,0), Jv(1,1), Jv(1,2));
@@ -666,7 +619,7 @@ void PlateView::drawBalanceControls() {
     // reachable with the plate flat.  A moving one does need one, and gets it
     // — see `BallReference`.  Bounded well inside the plate, since the edge is
     // where the ball leaves.
-    const float lim = static_cast<float>((tk_.params().R_table - 0.05) * 1000.0);
+    const float lim = static_cast<float>((kinematics().params().R_table - 0.05) * 1000.0);
 
     // --- Trajectory ---
     // Index-coupled to PathShape, in the order it declares them.
@@ -687,7 +640,7 @@ void PlateView::drawBalanceControls() {
         // the same one-frame skew the lap floor had, and the polygon corners
         // this reads are a function of it.
         path_.radius_m = path_radius_mm_ * 1e-3;
-        path_phase_ = phaseNearest(
+        sim_.path_phase = phaseNearest(
             path_, Eigen::Vector2d(sp_x_mm_ * 1e-3, sp_y_mm_ * 1e-3));
     }
 
@@ -727,7 +680,7 @@ void PlateView::drawBalanceControls() {
     ImGui::EndDisabled();
 
     const Eigen::Matrix<double, 6, 1> bp =
-        plateFrame(ball_, plate_motion_, kBallRadius);
+        plateFrame(sim_.ball, sim_.motion, kBallRadius);
     const double err = std::hypot(bp(0) - sp_x_mm_ * 1e-3,
                                   bp(1) - sp_y_mm_ * 1e-3);
     // Both warnings ride on the error line rather than taking lines of their
@@ -780,7 +733,7 @@ void PlateView::drawScene(float aspect) {
 
 void PlateView::drawMechanism() {
     LineRenderer& lr = *renderer_;
-    const TableParams& p = tk_.params();
+    const TableParams& p = kinematics().params();
 
     // Ground grid
     if (show_grid_) {
@@ -798,8 +751,8 @@ void PlateView::drawMechanism() {
     lr.circle({0, 0, 0}, p.R_ground, {0, 0, 1}, col::ground, 64, 2.0f);
 
     // Table: filled disc + edge
-    const Eigen::Matrix3d R = tk_.table_rotation(pose_.phi, pose_.theta);
-    const Eigen::Vector3d tc(0, 0, pose_.z_c);
+    const Eigen::Matrix3d R = kinematics().table_rotation(sim_.pose.phi, sim_.pose.theta);
+    const Eigen::Vector3d tc(0, 0, sim_.pose.z_c);
     const Eigen::Vector3d tn = R * Eigen::Vector3d(0, 0, 1);
 
     lr.disc(tc, p.R_table, tn, col::table_f, 64);
@@ -813,10 +766,10 @@ void PlateView::drawMechanism() {
 
     // Legs
     for (int i = 0; i < 3; ++i) {
-        const double alpha_i = alpha_deg_[i] * kDeg;
-        const Eigen::Vector3d G = tk_.ground_point(i);
-        const Eigen::Vector3d K = tk_.knee_position(i, alpha_i);
-        const Eigen::Vector3d P = tk_.table_point_world(i, pose_);
+        const double alpha_i = sim_.alpha_rad[i];
+        const Eigen::Vector3d G = kinematics().ground_point(i);
+        const Eigen::Vector3d K = kinematics().knee_position(i, alpha_i);
+        const Eigen::Vector3d P = kinematics().table_point_world(i, sim_.pose);
 
         lr.line(G, K, col::leg_L1, 3.0f);
         lr.line(K, P, col::leg_L2, 3.0f);
@@ -827,7 +780,7 @@ void PlateView::drawMechanism() {
             lr.point(P, col::joint_sph, 0.008f, 4.0f);
         }
         if (show_axes_) {
-            const Eigen::Vector3d t = tk_.tangent_dir(i);
+            const Eigen::Vector3d t = kinematics().tangent_dir(i);
             lr.line(G - 0.02 * t, G + 0.02 * t, {0.7f, 0.7f, 0.0f, 0.6f}, 1.5f);
         }
     }
@@ -865,11 +818,11 @@ void PlateView::drawMechanism() {
         // the same failure as the folded plate in #22 — a model doing
         // something the picture denies.
         const Eigen::Matrix<double, 6, 1> bpv =
-            plateFrame(ball_, plate_motion_, kBallRadius);
+            plateFrame(sim_.ball, sim_.motion, kBallRadius);
         const Eigen::Vector3d bc =
             tc + R * Eigen::Vector3d(bpv(0), bpv(1), bpv(2));
         const auto& edge = !ball_on_plate_ ? col::ball_off
-                         : ball_.airborne  ? col::ball_air
+                         : sim_.ball.airborne  ? col::ball_air
                                            : col::ball;
 
         // A wire sphere: a filled disc face-on to the plate, plus three great
@@ -890,7 +843,7 @@ void PlateView::drawMechanism() {
         // down to where it would be resting, and a ring on the plate under it.
         // Without them a hop of a few millimetres is invisible at this camera
         // distance, and the whole point is that it is happening.
-        if (ball_.airborne) {
+        if (sim_.ball.airborne) {
             const Eigen::Vector3d rest =
                 tc + R * Eigen::Vector3d(bpv(0), bpv(1), kBallRadius);
             lr.line(rest, bc, col::ball_air, 1.5f);

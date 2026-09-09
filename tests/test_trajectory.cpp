@@ -14,6 +14,7 @@
 #include "ball_contact.h"
 #include "ball_sim.h"
 #include "cascade_fixture.h"
+#include "sim_step.h"
 #include "table_kinematics.h"
 #include "test_helpers.h"
 
@@ -32,83 +33,72 @@ struct Track {
     bool lost = false;
 };
 
-/// PlateView::step's calls in PlateView::step's order, with the setpoint driven
-/// by a path and the loop given the path's velocity as its reference velocity.
+/// `stepSim` — the step the application drives, with the setpoint driven by a
+/// path and the loop given the path's velocity as its reference velocity.
 ///
 /// `feedforward` chooses whether that velocity is SUPPLIED, and no longer how
 /// it is applied: the arithmetic lives in `legCommand`, where the application
-/// gets it from too.  This harness used to carry its own copy — a second
-/// implementation of the loop is what let a real bug hide once already (#23),
-/// and a harness that computes the thing it is meant to be measuring is not
-/// evidence about the application.
+/// gets it from too.  Withholding it is the one thing this harness does that
+/// the application never does, so it is expressed the only way it can be — by
+/// telling the step there is no path and holding the setpoint at the point the
+/// path is passing through this frame.  A held setpoint has no velocity, which
+/// is exactly the case being measured.
+///
+/// Nothing else here is a copy of anything.  This file used to carry the whole
+/// causal order, and a second implementation of the loop is what let a real bug
+/// hide once already (#22) — a harness that recomputes the thing it is meant to
+/// be measuring is not evidence about the application.  See #30.
 Track follow(const ModelEntry& e, const Eigen::MatrixXd& K,
              const SetpointPath& path, bool feedforward, double duration) {
-    const TableParams tp = cascadeMechanism(e.params);
-    const TableKinematics tk(tp);
-    const double g = cascadeGravity(e.params);
-    const RollingBallDynamics dynamics(kPlateBall, PlateParams{tp.R_table, g});
+    const SimPlate plate = cascadePlate(e.params);
 
-    AutoBalanceDesign d;
-    d.K = K;
-    d.home_leg_rad = cascadeHomeLegAngle(e.params);
-    d.servo_tau = cascadeServoTau(e.params);
-    d.alpha_min_rad = tp.alpha_min;
-    d.alpha_max_rad = tp.alpha_max;
+    SimInput in;
+    in.design = cascadeDesign(e.params);
+    in.design.K = K;
+    in.path = path;
 
-    std::array<double, 3> alpha = {d.home_leg_rad, d.home_leg_rad, d.home_leg_rad};
-    TablePose pose = tk.home_pose(d.home_leg_rad);
-    PlateMotion pm = plateMotion(tk, pose, alpha, {0.0, 0.0, 0.0}), pm_prev = pm;
-
-    BallState ball;
     const Eigen::Vector2d start = pathPoint(path, 0.0);
-    ball.rolling << start(0), start(1), 0.0, 0.0;   // starts on the path
+    SimState s = simStart(plate, in.design.home_leg_rad,
+                          Eigen::Vector4d(start(0), start(1), 0.0, 0.0));
 
-    const double dt = 1.0 / 60.0;
+    const double dt = in.dt;
     Track r;
-    double t = 0.0, phase = 0.0, sum = 0.0;
+    double t = 0.0, sum = 0.0;
     int n = 0;
     for (int k = 0; k < static_cast<int>(duration / dt); ++k) {
-        // `stepPath`, which is what the application calls and in the order it
-        // calls it: read at the phase the frame opened on, advance afterwards.
-        // Not re-derived here — a harness that recomputes the thing it is
-        // measuring stops being evidence about the application.
-        const PathStep step = stepPath(path, phase, dt);
-        const Eigen::Vector2d sp = step.point;
-        const Eigen::Vector2d spv = step.velocity;
-        phase = step.next_phase;
-
-        const Eigen::Matrix<double, 6, 1> bp = plateFrame(ball, pm, kBallRadius);
-        Eigen::Vector4d seen(bp(0), bp(1), bp(3), bp(4));
-        if (ball.airborne) {
-            const Eigen::Vector2d land = predictedLanding(bp, kBallRadius, g);
-            seen << land(0), land(1), 0.0, 0.0;
+        if (!feedforward) {
+            // A HELD setpoint, moved by hand to where the path is passing this
+            // frame.  Held is the whole trick: a held setpoint has no velocity,
+            // which is exactly the case being measured, and the loop is handed
+            // the same position it would have been either way.
+            //
+            // The phase has to be walked here, because a `Fixed` path is one
+            // `stepSim` does not advance — nothing is running a lap.  That is
+            // the harness reaching into the step's state, and it is worth being
+            // plain that it is: what stops it becoming a second copy of the
+            // timing rule is that it walks the phase with `advancePhase`, the
+            // function `stepPath` itself walks it with, at the same `dt`.  The
+            // rule has one implementation; this drives it directly instead of
+            // through a path that is not running.
+            in.path.shape = PathShape::Fixed;
+            in.held_setpoint = pathPoint(path, s.path_phase);
+            s.path_phase = advancePhase(s.path_phase, dt, path.period_s);
         }
-        BallReference ref;
-        ref.position = sp;
-        if (feedforward && !ball.airborne) ref.velocity = spv;
-        const LegCommand c = legCommand(tk, d, alpha, seen, ref);
-        std::array<double, 3> adot{};
-        for (int j = 0; j < 3; ++j)
-            adot[j] = (c.alpha_rad[j] - alpha[j]) / d.servo_tau;
-        alpha = stepServosOnPlate(tk, alpha, c.alpha_rad, d.servo_tau, dt);
-        const FKResult fk = tk.solve_pose(alpha, pose);
-        if (fk.converged) pose = fk.pose;
-        pm_prev = pm;
-        pm = plateMotion(tk, pose, alpha, adot,
-                         servoAccel(adot, d.servo_tau), &pm_prev, dt);
-        ball = stepBallContact(dynamics, ball, pm, pm_prev, pose, kBallRadius, g, dt);
+        const SimReport frame = stepSim(plate, in, s);
+        const Eigen::Vector2d sp =
+            feedforward ? frame.setpoint : in.held_setpoint;
         t += dt;
 
-        const Eigen::Matrix<double, 6, 1> now = plateFrame(ball, pm, kBallRadius);
-        r.max_radius = std::max(r.max_radius, std::hypot(now(0), now(1)));
+        r.max_radius = std::max(r.max_radius,
+                                std::hypot(frame.ball_plate(0), frame.ball_plate(1)));
         if (t > path.period_s) {          // after one lap, so the start is not counted
-            const double err = std::hypot(now(0) - sp(0), now(1) - sp(1));
+            const double err = std::hypot(frame.ball_plate(0) - sp(0),
+                                          frame.ball_plate(1) - sp(1));
             r.max_error = std::max(r.max_error, err);
             sum += err;
             ++n;
         }
-        if (!ballOnPlate(Eigen::Vector4d(now(0), now(1), now(3), now(4)),
-                         tp.R_table, kBallRadius)) {
+        if (frame.left_plate) {
             r.lost = true;
             return r;
         }

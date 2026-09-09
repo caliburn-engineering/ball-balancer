@@ -27,6 +27,7 @@
 #include "panels/time_response_panel.h"
 
 #include "plate_view.h"
+#include "sim_step.h"
 
 // The design surface's current answer, in the form the plate needs it.
 //
@@ -46,18 +47,12 @@ static void handDesignToPlate(caliburn::AppState& state,
         state.preset_index < static_cast<int>(presets.size()) &&
         caliburn::isCascadeModel(presets[state.preset_index]);
 
+    // Assembled by `cascadeDesign`, which every test harness also calls: the
+    // plant the gain was designed against and the plant the plate checks
+    // against cannot be assembled two different ways, and neither can the
+    // plant a test claims to be measuring.
     caliburn::AutoBalanceDesign d;
-    if (is_cascade) {
-        // Every one of these comes from the same functions the model builder
-        // reads, so the plant the gain was designed against and the plant the
-        // plate checks against cannot be assembled two different ways.
-        d.home_leg_rad = caliburn::cascadeHomeLegAngle(state.current_params);
-        d.servo_tau = caliburn::cascadeServoTau(state.current_params);
-        d.mechanism = caliburn::cascadeMechanism(state.current_params);
-        d.gravity = caliburn::cascadeGravity(state.current_params);
-        d.alpha_min_rad = d.mechanism.alpha_min;
-        d.alpha_max_rad = d.mechanism.alpha_max;
-    }
+    if (is_cascade) d = caliburn::cascadeDesign(state.current_params);
 
     std::string reason;
     bool offered = false;

@@ -9,6 +9,7 @@
 #include "plot_panel.h"
 #include "renderer.h"
 #include "setpoint_path.h"
+#include "sim_step.h"
 #include "table_kinematics.h"
 
 #include <Eigen/Core>
@@ -92,14 +93,24 @@ private:
 
     /// Command all three legs to one angle.  A command, not a teleport: the
     /// Home/Low/High buttons ask, and the legs arrive one lag later like every
-    /// other command.  `snapServos` is the reset path, which has no lag to
-    /// respect because it is not driving anything.
+    /// other command.  The reset path does not go through here — `simStart`
+    /// puts the legs where they belong, since a reset is not driving anything
+    /// and has no lag to respect.
     void commandAllServos(float degrees);
-    void snapServos(float degrees);
 
-    /// Where the legs actually are, in radians — the argument every kinematics
-    /// call wants, assembled in one place instead of five.
-    std::array<double, 3> legsRad() const;
+    /// Where the legs actually are, in radians.  Now simply the simulation's
+    /// own leg state — the panels and the 3D view read it here rather than
+    /// converting a display float back to an angle, which is what they used to
+    /// do and which quietly quantised the plate the application simulated
+    /// against the one every harness did.
+    const std::array<double, 3>& legsRad() const { return sim_.alpha_rad; }
+
+    /// One leg, in degrees, for the readouts and the plots.
+    float legDeg(int i) const;
+
+    /// The mechanism the panels and the 3D view solve against — the plate's,
+    /// not a second one built to draw with.
+    const TableKinematics& kinematics() const { return plate_.kinematics(); }
 
     /// True when the design on hand can actually drive this plate.
     bool designUsable() const;
@@ -109,8 +120,16 @@ private:
     /// manual controls on it, so the two cannot disagree about who is driving.
     bool loopDriving() const;
 
-    TableKinematics tk_;
-    RollingBallDynamics ball_dynamics_;
+    /// The plate, the ball on it and the gravity they share, in the one object
+    /// `stepSim` takes.  Both halves used to be built here and again in every
+    /// harness; a test that measured a different ball from the one that ships
+    /// would have looked exactly like a test that measured this one.
+    SimPlate plate_;
+
+    /// Where the legs are, where the plate is, where the ball is, and how far
+    /// round the lap the setpoint has got.  Everything a frame hands to the
+    /// next, and the only thing `stepSim` writes.
+    SimState sim_;
 
     std::unique_ptr<LineRenderer> renderer_;
 
@@ -123,8 +142,12 @@ private:
     //
     // While the loop is closed the controller writes the command array, so the
     // (disabled) sliders read out what it is doing.
+    //
+    // Only the COMMAND is a member now.  Where the legs are is `sim_.alpha_rad`,
+    // because that is a fact about the simulation rather than about this panel
+    // — and holding it as a display float was quietly rounding the plate's own
+    // state to seven digits every frame.
     float alpha_cmd_deg_[3] = {45.0f, 45.0f, 45.0f};
-    float alpha_deg_[3] = {45.0f, 45.0f, 45.0f};
     bool link_servos_ = false;
 
     // --- Balance loop ---
@@ -146,16 +169,6 @@ private:
     float path_radius_mm_ = 120.0f;
     float path_period_s_ = 10.0f;
 
-    /// How far round the lap the setpoint is, in [0, 1), ACCUMULATED.
-    ///
-    /// Not derived from `sim_time_`, which is what it used to be and is the
-    /// bug: `t / period_s` moves by `t dT / T^2` when the lap slider moves, so
-    /// after 100 s a nudge from 10.0 to 9.5 s teleported the setpoint 170
-    /// degrees round the path and the loop dragged the ball across the plate
-    /// after it.  The size slider did it too, through the lap floor.  See
-    /// `advancePhase` and #24.
-    double path_phase_ = 0.0;
-
     // --- Camera ---
     OrbitCamera camera_;
     bool dragging_ = false;
@@ -173,9 +186,11 @@ private:
     float anim_amplitude_ = 5.0f;
 
     // --- Computed each frame ---
-    TablePose pose_{};
-    TablePose home_{};
-    FKResult fk_result_{};
+    // What the last step reported, kept only because the panels draw it.  The
+    // pose itself is not here: it is `sim_.pose`, which is both the plate's
+    // assembly and the seed the next solve starts from — one field, because
+    // they were always the same field.
+    SimReport report_{};
     double condition_num_ = 0.0;
     double manipulability_ = 0.0;
     float sim_time_ = 0.0f;
@@ -210,11 +225,14 @@ private:
 
     // --- Ball ---
     // Six states now, in two phases: the plate can lose contact and the ball
-    // can fly.  Measured, the shipped tuning does it in 30 of 72 kick
-    // directions — briefly, but really.  See issue #23 and `ball_contact.h`.
-    BallState ball_{};
-    PlateMotion plate_motion_{};   ///< this frame's, for the contact test
-    PlateMotion plate_motion_prev_{};
+    // can fly.  Rarely, on the shipped tuning: measured against the step this
+    // class drives, it never separates at the disturbance the Nudge buttons
+    // offer, and above that in narrow slivers of direction by fractions of a
+    // millimetre.  See issue #23, #30 and `ball_contact.h`.
+    //
+    // The ball itself and both frames of plate motion live in `sim_`; what is
+    // left here is what the PANEL knows about it rather than what the physics
+    // does.
     float airborne_flash_s_ = 0.0f;  ///< keeps a brief hop legible in the panel
     bool ball_enabled_ = true;
     bool ball_on_plate_ = true;

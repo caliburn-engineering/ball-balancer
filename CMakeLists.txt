@@ -132,6 +132,7 @@ add_library(ball_dynamics STATIC
     src/attract_mode.cpp
     src/ball_contact.cpp
     src/setpoint_path.cpp
+    src/sim_step.cpp
     src/auto_balance.cpp
     src/ball_sim.cpp
     src/ball_plant_linear.cpp

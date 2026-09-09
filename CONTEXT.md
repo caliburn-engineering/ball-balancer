@@ -334,17 +334,26 @@ Decided in [#19](https://github.com/caliburn-engineering/caliburn/issues/19).
 
 ### Leg command vs leg angle
 
-Two arrays, since the loop was closed.  `alpha_cmd_deg_` is what the sliders,
-the animation or the controller **ask for**; `alpha_deg_` is where the legs
-actually **are**, one first-order lag behind at the plant model's own `tau`.
+Two arrays, since the loop was closed.  `PlateView::alpha_cmd_deg_` is what the
+sliders, the animation or the controller **ask for**; `SimState::alpha_rad` is
+where the legs actually **are**, one first-order lag behind at the plant model's
+own `tau`.
+
+They live in different places on purpose, and it is the same distinction as
+everywhere else here: what the plate is being *asked* for belongs to the panel
+asking, and where the legs *are* is a fact about the simulation, so it sits in
+the state `stepSim` owns.  Where the legs are was also a display `float` until
+#30, which quietly rounded the plate the application simulated to seven digits
+while every harness ran it in double.
 
 The lag applies to **every** writer, not just the loop.  It is a property of
 the plate rather than of the controller, and making it conditional would mean
 the manual plate and the modelled plate are two different machines.  Home/Low/
 High therefore command rather than teleport, and the Animation amplitude is the
 amplitude *asked for* — attenuated about 1% at its default 0.5 Hz, which is
-what a real servo does.  `snapServos` is the one path that writes both arrays,
-because a reset is not driving anything.
+what a real servo does.  A reset is the one thing that is not a command:
+`simStart` puts the legs where they belong outright, because a reset is not
+driving anything and has no lag to respect.
 
 Before this the slider *was* the leg angle, and closing `u = -Kx` around that
 is an algebraic loop on the leg states — the gain would have been reacting to
@@ -542,6 +551,69 @@ revised for the opening path in
 > Prose may still call the running page "the demo" — that is the artefact, not
 > the mode.
 
+### One sim loop
+
+One simulation step, in `sim_step.h`, and the application and every test
+harness drive it:
+
+```
+setpoint → loop → servos → kinematics → plate motion → ball
+```
+
+`stepSim(plate, input, state)` *is* a frame.  `SimPlate` is the mechanism, the
+ball rolling on it and the gravity they share; `SimState` is everything a frame
+hands to the next; `SimInput` says what the plate is being **asked** for — the
+design, whether the loop or the sliders own the legs, which path the setpoint
+is running; `SimReport` says what came back.  `PlateView::step` is now the ImGui
+half of the frame plus one call, and a harness is a runner that decides what to
+*measure* and when to shove the ball.
+
+**This was five copies, and every one of the three things that went wrong with
+them was a divergence rather than a bug in any single copy.**
+
+- **A guard in one copy and not the other.**  #22's attract kick was thrown away
+  while the ball was airborne, and it hid because the harness carried a guard
+  the application did not.  The code review found the duplication at the time
+  and left it, with the right reason recorded: *"fair — it is what let finding 2
+  hide."*
+- **An edit that has to land five times.**  Making the plate's accelerations
+  analytic (#23) meant changing the same `plateMotion` call in `plate_view`,
+  twice in `test_attract_mode` plus once more inline, in `test_auto_balance` and
+  in `test_trajectory`.  Every copy got it, three suites went red, and no
+  harness pinned a baseline — so the `/grilling` session on #23 spent most of
+  its length unable to answer *which normal-force estimator was that table
+  measured against?*
+- **A silent disagreement nobody was looking for.**  The application computed
+  the servo rate `α̇ = (cmd − α)/τ` from the legs **after** the frame's step; all
+  five harnesses computed it from where they were **before** it.  Those differ
+  by `exp(−dt/τ)` — a factor of **1.40** at 60 Hz against a 0.05 s lag — and it
+  multiplies straight through `ω`, `ω̇` and `c̈` into whether the ball leaves the
+  plate at all.  Every harness had been measuring a plate 40 per cent livelier
+  than the shipped one, for as long as there had been harnesses.
+
+The rate belongs at the instant the pose belongs to, which is *after* the step:
+`plateMotion` is handed the pose and the leg angles at the end of the frame, so
+handing it a rate from the start of the frame pairs a configuration with a
+velocity from a different moment.  The application was self-consistent and the
+harnesses were not, so the application's order is the one that survived — which
+is also what "no user-visible change" requires.
+
+> **A harness that carries its own copy of the causal order is not evidence
+> about the application, it is evidence about itself.**
+> This is the same argument `cascade_fixture.h` already made about the gain and
+> the plant, extended to the thing they are measured *through*.  The runners
+> still differ — settling time against a setpoint, a whole trace against a path,
+> a disturbance swept over every direction — because those are different
+> questions.  What a frame *is* is not a different question.
+
+Two smaller transcriptions went with it.  `cascadePlate` and `cascadeDesign`
+build the plate and the operating point from one cascade parameter list, so the
+application's `handDesignToPlate` and every harness assemble them identically;
+and `simStart` owns what a start state is, so nothing begins from a plate with
+one real plate-motion frame and one default-constructed zero.
+
+Decided in [#30](https://github.com/caliburn-engineering/caliburn/issues/30).
+
 ### Contact, and the two phases
 
 The ball is no longer glued to the plate.  `RollingBallDynamics` still models
@@ -583,22 +655,34 @@ crawling at 24 mm/s and about as gentle as this demo gets:
 A corner is a step in the reference velocity by construction (`pathVelocity`
 says so), so the artefact fired on **every corner of every lap**.
 
-So separation is real, and it is *rare*.  Under the shipped tuning at a 0.26 m/s
-disturbance the ball separates in **2 of 720 directions**, peaking at **2.5 mm**
-— against the 30-in-72 and 6.6 mm this section reported while the estimator was
-differenced.  The plate does heave hard when the legs do (`z_c = 0.30·sin α`, so
-a 20° leg swing is 74 mm of table in a tenth of a second), and a loop rejecting a
-disturbance does slam the legs.  What changed is that the plate is no longer
-credited with accelerations its servos never produced.
+So separation is real, and it is *rarer than any figure this section has ever
+carried*.  Under the shipped tuning at a 0.26 m/s disturbance the ball separates
+in **0 of 720 directions**, and not by a hair: the worst frame of the whole
+sweep still has **1.62 m/s² of normal force in hand**, a sixth of a g.  The
+figures this paragraph used to give were 30-in-72 with the differenced
+estimator, then 2-in-720 once the accelerations went analytic.  Both were
+measured by harnesses that took the servo rate at the frame's *start* while
+pairing it with the pose at the frame's *end*, which runs the plate 40 per cent
+fast — see *One sim loop* above and #30.  At 0.30 m/s that alone was the
+difference between 26 directions in 72 separating and none.
+
+The plate does heave hard when the legs do (`z_c = 0.30·sin α`, so a 20° leg
+swing is 74 mm of table in a tenth of a second), and a loop rejecting a
+disturbance does slam the legs.  What changed, twice, is that the plate is no
+longer credited with accelerations its servos never produced.
 
 **Distinguish the tuning from the demo here, since they parted company.**  The
-shipped *tuning* can still hop, as above — but at 2 directions in 720 a visitor
-pressing Nudge will almost never see it, and the claim that they would was
-substantially an artefact of the differenced estimator.  The shipped *demo* no
-longer does at all, because it no longer kicks the ball: tracing a gentle circle
-never separates it, and `test_ten_minutes_unattended_never_loses_the_ball`
-asserts exactly that — zero airborne frames in ten minutes.  Both facts are
-pinned, and neither implies the other.  See *Attract mode*.
+shipped *tuning* can still hop, above about 0.30 m/s, in narrow slivers of
+direction and by fractions of a millimetre — measured but **not pinned**: where
+the tuning starts to let go is a sweep over speed as well as direction, and that
+is [#31](https://github.com/caliburn-engineering/caliburn/issues/31)'s, one of
+the harnesses *One sim loop* exists to be written against.  What is pinned is
+the disturbance the interface actually hands out, above.  The shipped *demo*
+does not hop at all, because it no longer kicks the ball: tracing a gentle
+circle never separates it, and
+`test_ten_minutes_unattended_never_loses_the_ball` asserts exactly that — zero
+airborne frames in ten minutes.  Neither fact implies the other.  See *Attract
+mode*.
 
 **Two phases, two frames, and the frame is not a detail.**  Rolling is natural
 in the plate frame — that is where `RollingBallDynamics` integrates and where
@@ -630,32 +714,35 @@ is the dead band's derivation, from `asin(c_rr)` to `atan(c_rr)`; see below.
 
 Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
 
-> **Three suites are red on this tree, deliberately, and all three fail under
-> the *Nominal* tuning.**
-> `test_auto_balance`, `test_trajectory` and `test_attract_mode`.  The analytic
-> normal force changes the ball's trajectories, which re-rolls which of the
-> demo's edge settings drive the loop into a near-singularity — the ball is
-> purely rolling and the *mechanism* binds, with no hop involved at all.  That
-> is [#22](https://github.com/caliburn-engineering/caliburn/issues/22)'s
-> territory rather than this section's, and it is tracked as
-> [#29](https://github.com/caliburn-engineering/caliburn/issues/29), which is a
-> release blocker.
->
-> It landed red on purpose.  The fix is independently sound — validated against
-> a central difference on a smooth drive, where a difference *is* valid, and the
+> **This landed with three suites red; one assertion is still red, and #30 is
+> what told them apart.**
+> `test_auto_balance`, `test_trajectory` and `test_attract_mode` all failed on
+> the tree that made the accelerations analytic, and the ticket was explicit
+> that this was on purpose: the fix is independently sound — validated against a
+> central difference on a smooth drive, where a difference *is* valid, and the
 > two agree to four decimals — and it is the baseline every subsequent
-> measurement has to be read against.  Holding it back is what entangled it with
-> the restitution work in a single commit and left the demo's loss numbers
-> unattributable to either.  The contract that Nominal holds every setting the
-> sliders offer binds the ticket that *closes* #23, not every commit on the way
-> there.
+> measurement has to be read against.  What it could not say was *which* of the
+> three failures were the new physics and which were the harnesses.
 >
-> One of the three is not a lost ball at all: Nominal now **saturates** the
-> servos, which falsifies the `LqrPreset` blurb "no saturation" that
-> `test_auto_balance` pins.  That is the blurb mechanism working as designed —
-> a claim that stops being true fails a build rather than merely misleading
-> somebody — and whether the answer is a re-measured blurb or a real regression
-> is #29's to settle, not a string to quietly edit.
+> Driving the application's own step answered that.  **Two of the three were the
+> harnesses.**  `test_auto_balance`'s Nominal preset no longer saturates the
+> servos, so the `LqrPreset` blurb "no saturation" is true again — it was the
+> 40-per-cent-fast plate that pushed it onto the stops.  `test_trajectory` keeps
+> the ball at every setting the sliders offer again, for the same reason.
+>
+> **One is real, and it is #29's.**
+> `test_the_aggressive_preset_recovers_from_every_direction` loses the ball in
+> direction 33 of 180 — 66.0° — rolling it to 293.7 mm against a rim at 280 mm.
+> No hop is involved: the ball is purely rolling and the aggressive gain simply
+> flings it wider than the plate.  Under the harnesses' old servo-rate instant
+> the same disease surfaced at a different grid point instead — the *shipped*
+> tuning, 1 direction in 720, at 162.5° — which is what `test_attract_mode` was
+> failing on before #30.  The last tree where every direction held is `3303ff4`,
+> one commit before the accelerations went analytic.  So the question for
+> [#29](https://github.com/caliburn-engineering/caliburn/issues/29) is a narrow
+> one now: either the analytic normal force needs a further look, or #19's
+> Aggressive `Q = 150` no longer clears the bar it was chosen for.  It remains a
+> release blocker.
 
 > **A separation is a claim about the plate's velocity, so it is only as good
 > as that velocity.**
@@ -671,16 +758,18 @@ Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
 
 > **An over-aggressive tuning does not merely overshoot — it throws the ball
 > off the plate.**
-> Q on ball position at 2000 loses the ball in 54 of 720 kick directions, with
-> launches reaching 689 mm.  Before this the same tuning looked merely fast,
-> because a glued ball cannot be thrown.  That is the honest ceiling on #19's
-> aggressive preset.
+> Q on ball position at 2000 takes the ball off the surface in 64 of 720 kick
+> directions and off the plate entirely in 5 of them.  Before this the same
+> tuning looked merely fast, because a glued ball cannot be thrown.  That is the
+> honest ceiling on #19's aggressive preset.
 >
-> **These two figures were measured with the differenced estimator and have not
-> been re-measured.**  Everything above about the shipped tuning has been; these
-> have not, and by the same argument they are likely overstated.  Read them as
-> the shape of the result rather than its size until
-> [#29](https://github.com/caliburn-engineering/caliburn/issues/29) re-runs them.
+> **Re-measured against the application's own step**, which is the correction
+> the previous note here was waiting for.  The figures it carried — 54 of 720,
+> "launches reaching 689 mm" — were the differenced estimator seen through a
+> harness running the plate 40 per cent fast.  The *altitude* was the part that
+> was overstated, and by three orders of magnitude: the peak hop is **6.4 mm**.
+> The shape of the result survives; a metre of altitude off a 0.26 m/s nudge
+> never was physics.
 
 ### Trajectory tracking
 

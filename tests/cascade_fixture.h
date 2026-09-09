@@ -8,11 +8,17 @@
 // both claiming to measure — the same reason `cascadeMechanism` and friends
 // are the single source for the application itself.
 //
-// The simulation LOOPS are deliberately not shared.  `test_auto_balance`
-// measures settling and peak against a setpoint; `test_attract_mode` records a
-// whole trace and needs the disturbance schedule inside the loop.  One harness
-// serving both would take a parameter per difference and answer neither
-// question clearly.
+// **The simulation loop is no longer here either, and it used not to be
+// anywhere.**  This comment used to argue that the loops were deliberately not
+// shared — that `test_auto_balance` measures settling against a setpoint while
+// `test_attract_mode` records a trace, and one harness serving both would take
+// a parameter per difference.  That is still true of the MEASURING, which is
+// why each file still has its own runner.  It was never true of the causal
+// order, and the five copies of that drifted apart exactly as this file's own
+// argument about the gain predicts they would: see `sim_step.h` and #30.
+//
+// So a runner here decides what to measure and when to shove the ball, and
+// `stepSim` decides what a frame IS.
 
 #include "analysis/lqr.h"
 #include "analysis/model_library.h"

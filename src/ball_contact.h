@@ -216,6 +216,26 @@ void worldOf(const BallState& b, const PlateMotion& plate, double ball_radius,
 /// visible behaviour this ticket is about — the ball leaving the plate at all —
 /// does not depend on it.  A bounce would be a second guess stacked on the
 /// first.
+///
+/// `normal_accel_used`, if given, receives the `N/m` this frame was decided by
+/// — the number, not a caller's reconstruction of it.  Which value that is
+/// depends on the branch taken, and that is the point of reporting it:
+///
+///   - **In contact, rates believed:** `normalAccel` against the ball's state
+///     at the frame's START, which is where the ball was when the plate was
+///     either still pressing it or not.  Positive held contact; negative ended
+///     it, and is the frame the ball left on.
+///   - **In contact, rates not believed:** `quasiStaticNormalAccel`, which is
+///     what actually scaled the rolling resistance — the tilt is trustworthy
+///     when the rates are not, so it is the part of the answer that survives.
+///   - **Already in flight:** zero.  A plate touching nothing presses with
+///     nothing.
+///
+/// Anything measuring the margin the plate is holding the ball by has to ask
+/// for it here.  Recomputing `normalAccel` outside is a second opinion about
+/// which state and which guard it was evaluated under, and it will differ:
+/// against the end-of-frame ball rather than the start-of-frame one, without
+/// the trust gate, and with a `z` that has to be assumed.
 BallState stepBallContact(const RollingBallDynamics& dynamics,
                           const BallState& b,
                           const PlateMotion& now,
@@ -223,6 +243,7 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
                           const TablePose& pose,
                           double ball_radius,
                           double gravity,
-                          double dt);
+                          double dt,
+                          double* normal_accel_used = nullptr);
 
 }  // namespace caliburn
