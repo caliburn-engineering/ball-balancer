@@ -555,16 +555,48 @@ down under the ball, the plate's rotation swinging the contact point, and
 Coriolis.  **`N/m ≤ 0` is separation**: a surface can push a ball and never
 pull it.
 
-This is not a corner case.  Measured under the shipped tuning and a 0.26 m/s
-disturbance, the ball separates in 30 of 72 directions — briefly, a few frames,
-hopping 6.7 mm.  The plate heaves hard because the legs do (`z_c = 0.30·sin α`,
-so a 20° leg swing is 74 mm of table in a tenth of a second), and a loop
-rejecting a disturbance slams the legs.
+**The rates in that expression are analytic, and most of the hopping this
+section used to report was the estimator rather than the plate.**  `c̈` and `ω̇`
+were a finite difference of `ċ` and `ω` across consecutive frames — a defensible
+estimator for a smooth signal, and these are not smooth.  The leg rate is
+`(cmd − α)/τ`, and `cmd` is a zero-order hold: it *steps* every time the loop
+changes its mind, and differencing a step gives `1/dt`.  The overstatement is
+exactly `τ/dt` on a stepping frame — 3× at 60 Hz and 12× at 240 — so it grew as
+the timestep shrank rather than converging.
+
+The servo lag differentiates in closed form instead.  `cmd` is held across the
+whole frame, so `α̈ = −α̇/τ` exactly, and the same Jacobian that carries `α̇` to
+the pose rates carries it to the pose accelerations.  What is left to difference
+is how `J_v` and the tilt-rate map are themselves changing, and those are
+functions of the leg angles and the pose: continuous, neither of them stepping.
+Both history terms are load-bearing — dropping them gets `ω̇` wrong by 13% and
+`c̈` wrong in *sign*.
+
+Measured at the corner of a square path on a thirty-second lap, a setpoint
+crawling at 24 mm/s and about as gentle as this demo gets:
+
+| | `\|ω̇\|` | `N/m` | outcome |
+|---|---|---|---|
+| differenced | 101 rad/s² | −7.3 | ball launched at 0.26 m/s |
+| analytic | 50 rad/s² | −0.6 | contact held |
+
+A corner is a step in the reference velocity by construction (`pathVelocity`
+says so), so the artefact fired on **every corner of every lap**.
+
+So separation is real, and it is *rare*.  Under the shipped tuning at a 0.26 m/s
+disturbance the ball separates in **2 of 720 directions**, peaking at **2.5 mm**
+— against the 30-in-72 and 6.6 mm this section reported while the estimator was
+differenced.  The plate does heave hard when the legs do (`z_c = 0.30·sin α`, so
+a 20° leg swing is 74 mm of table in a tenth of a second), and a loop rejecting a
+disturbance does slam the legs.  What changed is that the plate is no longer
+credited with accelerations its servos never produced.
 
 **Distinguish the tuning from the demo here, since they parted company.**  The
-shipped *tuning* hops, as above, and a visitor pressing Nudge will see it.  The
-shipped *demo* no longer does, because it no longer kicks the ball: tracing a
-gentle circle never separates it, and `test_ten_minutes_unattended_never_loses_the_ball`
+shipped *tuning* can still hop, as above — but at 2 directions in 720 a visitor
+pressing Nudge will almost never see it, and the claim that they would was
+substantially an artefact of the differenced estimator.  The shipped *demo* no
+longer does at all, because it no longer kicks the ball: tracing a gentle circle
+never separates it, and `test_ten_minutes_unattended_never_loses_the_ball`
 asserts exactly that — zero airborne frames in ten minutes.  Both facts are
 pinned, and neither implies the other.  See *Attract mode*.
 
@@ -590,13 +622,40 @@ for the one caller that cannot have the real thing, the frame where the rates
 are not trustworthy, and for linearising about the flat equilibrium.
 
 The correction is one of principle rather than of magnitude, and it is worth
-being plain about that.  It moves the separation count not at all — 30 of 72
+being plain about that.  It moves the separation count not at all — the same
 directions either way, and the peak hop by 0.0001 mm — because separation is
 decided by `normalAccel`, which friction does not enter, and because near
 separation `N` is small and so is anything scaled by it.  What it does change
 is the dead band's derivation, from `asin(c_rr)` to `atan(c_rr)`; see below.
 
 Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
+
+> **Three suites are red on this tree, deliberately, and all three fail under
+> the *Nominal* tuning.**
+> `test_auto_balance`, `test_trajectory` and `test_attract_mode`.  The analytic
+> normal force changes the ball's trajectories, which re-rolls which of the
+> demo's edge settings drive the loop into a near-singularity — the ball is
+> purely rolling and the *mechanism* binds, with no hop involved at all.  That
+> is [#22](https://github.com/caliburn-engineering/caliburn/issues/22)'s
+> territory rather than this section's, and it is tracked as
+> [#29](https://github.com/caliburn-engineering/caliburn/issues/29), which is a
+> release blocker.
+>
+> It landed red on purpose.  The fix is independently sound — validated against
+> a central difference on a smooth drive, where a difference *is* valid, and the
+> two agree to four decimals — and it is the baseline every subsequent
+> measurement has to be read against.  Holding it back is what entangled it with
+> the restitution work in a single commit and left the demo's loss numbers
+> unattributable to either.  The contract that Nominal holds every setting the
+> sliders offer binds the ticket that *closes* #23, not every commit on the way
+> there.
+>
+> One of the three is not a lost ball at all: Nominal now **saturates** the
+> servos, which falsifies the `LqrPreset` blurb "no saturation" that
+> `test_auto_balance` pins.  That is the blurb mechanism working as designed —
+> a claim that stops being true fails a build rather than merely misleading
+> somebody — and whether the answer is a re-measured blurb or a real regression
+> is #29's to settle, not a string to quietly edit.
 
 > **A separation is a claim about the plate's velocity, so it is only as good
 > as that velocity.**
@@ -616,6 +675,12 @@ Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
 > launches reaching 689 mm.  Before this the same tuning looked merely fast,
 > because a glued ball cannot be thrown.  That is the honest ceiling on #19's
 > aggressive preset.
+>
+> **These two figures were measured with the differenced estimator and have not
+> been re-measured.**  Everything above about the shipped tuning has been; these
+> have not, and by the same argument they are likely overstated.  Read them as
+> the shape of the result rather than its size until
+> [#29](https://github.com/caliburn-engineering/caliburn/issues/29) re-runs them.
 
 ### Trajectory tracking
 
