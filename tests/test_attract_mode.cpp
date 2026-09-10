@@ -484,6 +484,118 @@ void test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance() {
     ASSERT_TRUE(margin > 1.0);
 }
 
+// ---------------------------------------------------------------------------
+// A shove landing on a plate that is already working
+// ---------------------------------------------------------------------------
+//
+// Every sweep above sets the ball down at rest, lets it settle to the centre of
+// a level plate against a HELD setpoint, and shoves it there.  **The demo never
+// looks like that.**  It opens tracking a circle and stays tracking it, so when
+// a visitor reaches for Nudge the legs are already displaced, already moving,
+// and the setpoint is somewhere else on the lap.  The shove lands on a plate
+// that is already spending its workspace.
+//
+// That gap is why the interface could offer a shove the loop could not take
+// while every test passed.  Measured over 36 points of the lap and 24
+// directions, adding the shove to a ball tracking the opening circle:
+//
+//     speed   Nominal   Aggressive   Detuned      (failures out of 864)
+//     0.25       0           0          0
+//     0.30       0           0          0
+//     0.35       6           5          0
+//     0.40       9           5          1
+//     0.50      37         123          0
+//
+// From rest all three survive 0.5 in every direction, which is what
+// `kMaxNudgeSpeed` used to be set to and what
+// `test_aggressive_is_no_more_fragile_than_the_shipped_tuning` still checks.
+// While tracking, 0.5 loses the ball at every point of the lap once the two
+// Nudge buttons are pressed together.  So the bound came down to 0.30, and the
+// slider to `kMaxNudgePerAxis` so the pair composes to exactly that.
+//
+// Detuned's row is the reminder that these are slivers rather than a threshold:
+// it fails at 0.40 and 0.45 and is clean again at 0.50.  The bound is set below
+// the first failure of any tuning, with margin, exactly as `kMaxSetpointSpeed`
+// is.
+struct Tracked {
+    bool lost = false;
+    double end_error = 0.0;   ///< [m] ball to setpoint, twenty seconds later
+};
+
+/// One shove of `speed` in direction `theta`, delivered `phase0` of the way
+/// round the lap while the opening circle is being tracked.
+Tracked shoveWhileTracking(const ModelEntry& e, const Eigen::MatrixXd& K,
+                           double phase0, double speed, double theta) {
+    const SimPlate plate = cascadePlate(e.params);
+    SimInput in;
+    in.design = cascadeDesign(e.params);
+    in.design.K = K;
+    in.path = openingPath();
+
+    SimState s = simStart(plate, in.design.home_leg_rad, attractStart(in.path));
+
+    const double dt = in.dt;
+    const int at = static_cast<int>(phase0 * in.path.period_s / dt);
+    const int total = at + static_cast<int>(20.0 / dt);
+
+    Tracked r;
+    for (int k = 0; k < total; ++k) {
+        // Exactly what the buttons do: added to the ball's own velocity, not
+        // assigned over it.  The ball is already running at 75 mm/s, and a
+        // shove is a shove rather than a teleport of the state.
+        if (k == at && !s.ball.airborne) {
+            s.ball.rolling(2) += speed * std::cos(theta);
+            s.ball.rolling(3) += speed * std::sin(theta);
+        }
+        const SimReport f = stepSim(plate, in, s);
+        if (f.left_plate) { r.lost = true; return r; }
+        if (k + 1 == total)
+            r.end_error = std::hypot(f.ball_plate(0) - f.setpoint(0),
+                                     f.ball_plate(1) - f.setpoint(1));
+    }
+    return r;
+}
+
+// The hardest shove the interface can compose, at every point of the lap and
+// from every direction: the ball stays on the plate and goes back to tracking.
+//
+// A coarser grid than the 36 x 24 the table above was measured on, because this
+// runs on every build; the bound it checks is the one that measurement chose.
+void test_a_shove_while_tracking_is_rejected_from_every_direction() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+    const Eigen::MatrixXd K = defaultGain(e);
+
+    double worst_error = 0.0;
+    for (int i = 0; i < 12; ++i) {
+        for (int j = 0; j < 12; ++j) {
+            const Tracked t = shoveWhileTracking(
+                e, K, double(i) / 12.0, kMaxNudgeSpeed, j * M_PI / 6.0);
+            ASSERT_TRUE(!t.lost);
+            worst_error = std::max(worst_error, t.end_error);
+        }
+    }
+    // And back ON the path, not merely still on the plate.  The demo's own
+    // tracking error is 3.7 mm; twenty seconds after the worst shove the
+    // interface can deliver it is back inside 15.
+    ASSERT_TRUE(worst_error < 0.015);
+}
+
+// The buttons compose, and the bound has to survive that.
+//
+// "Nudge +x" and "Nudge +y" each add the slider's value to one axis, so the
+// worst the pair can do is `sqrt(2)` times the slider at 45 degrees.  The
+// slider's top used to be `kMaxNudgeSpeed` itself, which made the constant's
+// own description — the largest disturbance the interface can hand the loop —
+// false by a factor of 1.41, and handed it 0.707 m/s.  Arithmetic, so it is
+// checked as arithmetic: raise the slider's ceiling without re-measuring the
+// envelope and this fails.
+void test_the_nudge_buttons_cannot_compose_past_the_bound() {
+    const double both = std::hypot(kMaxNudgePerAxis, kMaxNudgePerAxis);
+    ASSERT_NEAR(both, kMaxNudgeSpeed, 1e-12);
+    ASSERT_TRUE(kMaxNudgePerAxis < kMaxNudgeSpeed);
+}
+
 // The Aggressive preset (#19), against the disturbance the demo itself
 // offers.  It saturates the servos from every direction and still brings the
 // ball home from every direction, which is what makes saturation a bounded
@@ -593,6 +705,8 @@ int main() {
     test_the_demo_tracks_its_circle();
     test_the_kick_is_rejected_from_every_direction();
     test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance();
+    test_a_shove_while_tracking_is_rejected_from_every_direction();
+    test_the_nudge_buttons_cannot_compose_past_the_bound();
     test_the_aggressive_preset_recovers_from_every_direction();
     test_an_over_aggressive_tuning_throws_the_ball_off();
     test_ten_minutes_unattended_never_loses_the_ball();

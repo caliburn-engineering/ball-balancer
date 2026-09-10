@@ -459,11 +459,12 @@ void PlateView::drawControls() {
         sim_.ball.rolling << 0.06, -0.04, 0.0, 0.0;
         ball_on_plate_ = true;
     }
-    // The top of this slider is the hardest shove the interface can offer, and
-    // the preset tunings are tested against exactly that number.  See
-    // `kMaxNudgeSpeed`.
+    // Per AXIS, and the top is `kMaxNudgePerAxis` rather than `kMaxNudgeSpeed`
+    // — because the two buttons above compose, and the hardest shove the
+    // interface can offer is the pair at 45 degrees rather than either one.
+    // See `kMaxNudgePerAxis`.
     ImGui::SliderFloat("Nudge [m/s]", &ball_nudge_, 0.02f,
-                       static_cast<float>(kMaxNudgeSpeed), "%.2f");
+                       static_cast<float>(kMaxNudgePerAxis), "%.2f");
 
     drawBalanceControls();
 

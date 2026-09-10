@@ -242,8 +242,8 @@ std::array<double, 3> stepServosOnPlate(const TableKinematics& tk,
 Eigen::VectorXd defaultLqrStateWeights(int n);
 Eigen::VectorXd defaultLqrInputWeights(int m);
 
-/// The largest disturbance the interface can hand the loop: the top of Plate
-/// Control's Nudge slider, in m/s along one axis.
+/// The largest disturbance the interface can hand the loop, in m/s, as a SPEED
+/// in any direction.
 ///
 /// Here rather than beside the slider because it is what bounds an honest
 /// preset.  "This tuning does not lose the ball" is only a claim if something
@@ -251,7 +251,39 @@ Eigen::VectorXd defaultLqrInputWeights(int m);
 /// visitor ask for.  The slider reads this constant and so does the test that
 /// checks the presets against it — raise it and the test fails, which is the
 /// point.
-constexpr double kMaxNudgeSpeed = 0.5;
+///
+/// **It was 0.5, and 0.5 was measured against the wrong situation.**  That
+/// number came from shoving a ball sitting at rest at the centre of a level
+/// plate with a held setpoint, and from rest every shipped tuning does survive
+/// it.  The demo does not open like that: it opens tracking a circle, so the
+/// legs are already displaced and the ball is already running at 75 mm/s when
+/// the visitor reaches for Nudge.  A shove there lands on a plate that is
+/// already working, and the envelope is much smaller — measured over 36 points
+/// of the lap and 24 directions, every preset is clean at 0.30 and Nominal
+/// loses the ball at 0.35.  See
+/// `test_a_shove_while_tracking_is_rejected_from_every_direction`.
+///
+/// The slivers thin as the shove shrinks rather than stopping at a threshold —
+/// the same shape as `kMaxSetpointSpeed`'s bound, and the same reason for
+/// leaving margin rather than sitting on the first clean measurement.
+constexpr double kMaxNudgeSpeed = 0.30;
+
+/// What one Nudge button may add along its own axis.
+///
+/// **Derived, not chosen, because the two buttons compose.**  "Nudge +x" and
+/// "Nudge +y" each add their slider's worth to one axis, so pressing both gives
+/// a shove of `sqrt(2)` times the slider at 45 degrees — and the slider's top
+/// used to BE `kMaxNudgeSpeed`, so two clicks handed the loop 0.707 m/s against
+/// a constant whose own comment called itself the largest disturbance the
+/// interface can hand it.  Measured, that pair lost the ball at every one of 36
+/// points of the lap.
+///
+/// Dividing here is what makes that sentence true: the worst the pair can
+/// compose to is exactly `kMaxNudgeSpeed`, which is the number the envelope was
+/// measured at.  Bounding the buttons rather than clamping the ball afterwards,
+/// because a clamp would also be silently deciding what the ball's own tracking
+/// velocity is allowed to be, and that is not a disturbance.
+inline const double kMaxNudgePerAxis = kMaxNudgeSpeed / M_SQRT2;
 
 /// A named tuning, as a visitor meets it.
 ///

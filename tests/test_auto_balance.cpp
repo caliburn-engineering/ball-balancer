@@ -673,8 +673,18 @@ void test_the_aggressive_preset_is_fast_and_saturates() {
 // The honest statement of where the line is drawn is a comparison, not an
 // absolute — Aggressive is offered because it is no more fragile than the
 // tuning the demo already ships, against the hardest shove the interface can
-// deliver.  Both DO lose the ball above `kMaxNudgeSpeed`; that is a property
-// of the plate, not of the preset, and is why the slider stops where it does.
+// deliver.
+//
+// **This is the EASY half of that claim, and it is worth being clear which
+// half.**  The ball starts at rest at the centre of a level plate against a
+// held setpoint, which is the situation the loop finds least demanding: from
+// rest both tunings survive 0.5 m/s from every direction, and `kMaxNudgeSpeed`
+// used to be set to that.  The demo does not open at rest — it opens tracking a
+// circle, and a shove landing on legs that are already displaced is a much
+// harder question with a much smaller answer.  That envelope is what now sets
+// the slider's ceiling; see
+// `test_a_shove_while_tracking_is_rejected_from_every_direction` in
+// `test_attract_mode`, which is the half that binds.
 //
 // Pinned here rather than left as prose because prose does not fail when
 // somebody raises the slider's ceiling.  Twenty-four directions at the top of

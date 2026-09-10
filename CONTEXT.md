@@ -336,12 +336,34 @@ phases" for what an over-aggressive gain does to a ball it can no longer hold.
 on a 0.43 m/s nudge.
 
 150 is the fastest tuning measured that is **no more fragile than the tuning
-the demo already ships**: at `kMaxNudgeSpeed`, the top of the Nudge slider,
-neither loses the ball in any of 24 directions.  Both do above it, which is a
-property of the plate rather than of the preset and is why the slider stops
-where it does.  Pinned by
+the demo already ships**: at `kMaxNudgeSpeed`, neither loses the ball in any of
+24 directions.  Pinned by
 `test_aggressive_is_no_more_fragile_than_the_shipped_tuning`, so raising that
 ceiling fails a test rather than quietly invalidating this paragraph.
+
+> **What the Nudge slider stops at, and why it came down from 0.5 to 0.30.**
+> Both numbers are measured; they measure different situations, and only one of
+> them is the situation the demo is in.  From rest at the centre of a level
+> plate, every tuning survives 0.5 m/s from every direction — that is the sweep
+> above, and it is the loop's easiest question.  The demo opens *tracking a
+> circle*, so a visitor reaching for Nudge is shoving a ball that is already
+> running at 75 mm/s past legs that are already displaced.  Swept over 36 points
+> of the lap and 24 directions, every tuning is clean at 0.30 and Nominal starts
+> losing the ball at 0.35.
+>
+> The interface could hand over 0.707 m/s, because **the two Nudge buttons
+> compose**: each adds the slider's value to one axis, so the pair is `sqrt(2)`
+> times it at 45 degrees, and the slider's top *was* `kMaxNudgeSpeed` itself.
+> Measured, that pair lost the ball at every one of 36 points of the lap while
+> every test passed — because every test shoved from rest.  So `kMaxNudgePerAxis`
+> is the slider's ceiling now, derived as `kMaxNudgeSpeed / sqrt(2)`, and the
+> worst the pair composes to is exactly the number the envelope was measured at.
+>
+> The slivers thin as the shove shrinks rather than stopping at a threshold —
+> Detuned fails at 0.40 and 0.45 and is clean again at 0.50 — which is the same
+> shape as `kMaxSetpointSpeed`'s bound and the same reason for leaving margin.
+> A demo whose controls include a setting that breaks it is not offering a
+> choice, it is offering a trap.
 
 Detuned interacts with attract mode harmlessly: it settles in 11.4 s against a
 4 s kick period, so kicks would pile up — but choosing a preset is a click, and
