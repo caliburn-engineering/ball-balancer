@@ -174,10 +174,26 @@ bool PlateView::designUsable() const {
 }
 
 bool PlateView::loopDriving() const {
-    // The ball is part of the precondition, not a detail: with the simulation
-    // off there is nothing to balance, and the loop would hold the plate at
-    // whatever tilt the frozen ball state asks for, forever.
-    return balance_engaged_ && ball_enabled_ && designUsable();
+    // The ball is part of the precondition, not a detail: with nothing being
+    // simulated there is nothing to balance, and the loop would hold the plate
+    // at whatever tilt the frozen ball state asks for, forever.
+    //
+    // **Both ways the ball can stop moving, not just one.**  This used to test
+    // `ball_enabled_` alone, which is the checkbox — and a ball that has rolled
+    // off the plate with Auto-reset switched off stops being stepped too (see
+    // `step`, which passes `ball_enabled_ && ball_on_plate_` to `stepSim`).  So
+    // the loop went on regulating a state that could never change again, and
+    // pinned the plate at the tilt that dead ball asked for.  Exactly the
+    // failure this function's first paragraph claims to prevent, reached by the
+    // door it was not watching: the visitor sees a plate stuck over hard and a
+    // Nudge button that does nothing, because the ball it nudges is not being
+    // integrated.  Reset Ball was the only way out.
+    //
+    // Suspended rather than dropped: `balance_engaged_` is left alone, so
+    // putting a ball back resumes the loop rather than asking the visitor to
+    // re-engage it.  That is what unchecking and re-checking "Simulate ball"
+    // has always done, and these are the same situation.
+    return balance_engaged_ && ball_enabled_ && ball_on_plate_ && designUsable();
 }
 
 void PlateView::setDesign(const AutoBalanceDesign& d, bool offered,
@@ -600,11 +616,20 @@ void PlateView::drawBalanceControls() {
         return;
     }
 
-    ImGui::BeginDisabled(!ball_enabled_);
+    ImGui::BeginDisabled(!ball_enabled_ || !ball_on_plate_);
     ImGui::Checkbox("Engage", &balance_engaged_);
     ImGui::EndDisabled();
     if (!ball_enabled_) {
         ImGui::TextWrapped("unavailable: there is no ball to balance");
+        return;
+    }
+    // A ball off the plate suspends the loop rather than dropping it — see
+    // `loopDriving`.  Saying which button resumes it matters: the ball is not
+    // being stepped, so Nudge is inert and the panel would otherwise offer no
+    // way out of a plate stuck over hard.
+    if (!ball_on_plate_) {
+        ImGui::TextWrapped("suspended: the ball is off the plate - "
+                           "Reset Ball to resume");
         return;
     }
     if (!balance_engaged_) {

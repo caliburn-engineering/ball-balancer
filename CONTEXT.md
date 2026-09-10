@@ -227,8 +227,8 @@ anywhere.
 
 Engaged from Plate Control, and only while the model panel is offering a gain
 that was solved against **this** plate: the right controller type, a successful
-solve, a `3 x 7` gain, a ball actually being simulated, and a plant whose
-geometry *and gravity* match the simulated one.  Gravity is a cascade parameter
+solve, a `3 x 7` gain, a ball actually being simulated *and still on the plate*,
+and a plant whose geometry *and gravity* match the simulated one.  Gravity is a cascade parameter
 and the plate's is fixed, so a gain designed on the moon is exactly as wrong as
 one designed for longer legs and is refused the same way.  Losing any of those
 drops the loop rather than freezing the last command, because a stale gain is
@@ -240,6 +240,23 @@ The plant a cascade parameter list describes is built by `cascadeMechanism` /
 builder, the application and the tests all read those same functions.  A second
 transcription is how the check comes to reject two identical plates — it did,
 once, over a `float` slider widening to `0.3000000119`.
+
+> **A ball that has left the plate suspends the loop, and this was a bug.**
+> `loopDriving` tested "is the ball being simulated" as the *Simulate ball*
+> checkbox alone.  But a ball that has rolled off with *Auto-reset* switched off
+> stops being stepped too — `step` hands `stepSim` `ball_enabled_ &&
+> ball_on_plate_` — so the loop went on regulating a state that could never
+> change again, and pinned the plate at whatever tilt that dead ball asked for.
+> Exactly the failure `loopDriving` already existed to prevent, reached through
+> the door it was not watching.  What a visitor saw was a plate stuck hard over
+> and a Nudge button that did nothing, because the ball it nudges is not being
+> integrated; Reset Ball was the only way out and nothing said so.
+>
+> **Suspended, not dropped.**  `balance_engaged_` is left alone, so putting a
+> ball back resumes the loop rather than asking the visitor to re-engage it —
+> which is what unchecking and re-checking *Simulate ball* has always done, and
+> these are the same situation.  This is the one precondition that does not go
+> through `setDesign`, because it is not a fact about the design.
 
 Decided in [#16](https://github.com/caliburn-engineering/caliburn/issues/16).
 
