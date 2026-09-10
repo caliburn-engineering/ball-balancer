@@ -468,9 +468,9 @@ TablePose TableKinematics::tilted_pose(double tilt_rad, double azimuth_rad,
 
 double TableKinematics::max_conditioned_tilt(double z_c,
                                              double condition_limit) const {
-    // Enough directions to catch the three-fold asymmetry the triad has, and
-    // its mirror: the worst direction on the shipped geometry sits at 125 and
-    // 235 degrees, which a coarser fan straddles.
+    // Measured: every fan from 12 to 144 directions returns the same tilt to
+    // five decimal places, and 360 moves it by 0.0002 degrees.  36 is where
+    // the cost stops mattering rather than where the answer settles.
     constexpr int kDirections = 36;
     constexpr double kStep = 0.5 * M_PI / 180.0;
     constexpr double kCeiling = M_PI / 3.0;     // no plate of this family leans 60
@@ -508,7 +508,9 @@ double TableKinematics::max_conditioned_tilt(double z_c,
     if (bad < 0.0) return good;         // never failed below the ceiling
 
     // Only now, inside a bracket the march has already proved straddles the
-    // edge, is halving safe.
+    // edge, is halving safe: the march has established there is an unbroken
+    // run of successes up to `good` and a failure at `bad`, which is the
+    // assumption a bisection over the whole range would have had to make.
     for (int i = 0; i < kRefinements; ++i) {
         const double mid = 0.5 * (good + bad);
         if (holds(mid)) good = mid; else bad = mid;

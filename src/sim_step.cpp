@@ -13,11 +13,13 @@ double maxBallAccel(const TableKinematics& tk, double gravity,
     return RollingBallDynamics::rolling_factor() * gravity * std::sin(theta_max);
 }
 
+// `caliburn::` because the member `maxBallAccel()` hides the free function of
+// the same name inside the class's own scope.  They are deliberately the same
+// name: one measures the quantity, the other remembers it.
 SimPlate::SimPlate(const TableParams& table, double gravity, double home_leg_rad)
     : tk_(table),
       rolling_(kPlateBall, PlateParams{table.R_table, gravity}),
       gravity_(gravity),
-      home_leg_rad_(home_leg_rad),
       max_ball_accel_(caliburn::maxBallAccel(tk_, gravity, home_leg_rad)) {}
 
 SimPlate cascadePlate(const std::vector<PhysicalParam>& params) {
@@ -71,14 +73,13 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
     // and its phase must not move — a lap the setpoint is not running is a lap
     // that should still be where it was left when a shape is chosen.
     //
-    // The corner blend is taken from the PLATE rather than from `in`.  How
+    // The corner fillet is taken from the PLATE rather than from `in`.  How
     // tightly the setpoint may turn is the most acceleration this mechanism
     // can give the ball, which is a fact about the plant and not about what
     // the visitor asked for — so a harness cannot measure a reference the
     // plate could never have followed, and cannot forget to ask for a feasible
-    // one.  See `maxBallAccel` and #31.
-    SetpointPath path = in.path;
-    path.accel_max = plate.maxBallAccel();
+    // one.  See `SimPlate::feasible` and #31.
+    const SetpointPath path = plate.feasible(in.path);
 
     PathStep path_step;
     if (path.shape == PathShape::Fixed) {

@@ -118,7 +118,6 @@ PlateView::PlateView()
     // along it, so the first frame that draws is a frame of the demo working
     // rather than a frame of it starting up.  Both errors are zero here, which
     // is what keeps the legs still — see `attract_mode.h`.
-    path_ = openingPath();
     // How tightly the setpoint may turn its corners, from the plate itself.
     // Set once because `plate_` is built once: the geometry the visitor sees
     // never changes under them, and a leg length that did would be a different
@@ -127,8 +126,8 @@ PlateView::PlateView()
     // Here rather than only inside `stepSim` because the panel asks the path
     // its own questions — the lap floor, the outline it draws, the phase a
     // shape change re-seeds from — and a path answering those with sharp
-    // corners while the step drove blended ones would be two paths.
-    path_.accel_max = plate_.maxBallAccel();
+    // corners while the step drove filleted ones would be two paths.
+    path_ = plate_.feasible(openingPath());
     path_radius_mm_ = static_cast<float>(path_.radius_m * 1000.0);
     path_period_s_ = static_cast<float>(path_.period_s);
     sim_ = simStart(plate_, kHomeLegRad, attractStart(path_));
@@ -709,7 +708,7 @@ void PlateView::drawBalanceControls() {
         // a filleted square reads as a square drawn wrong.  Only where there
         // are corners: a circle would report a fillet of zero, which is a line
         // of text saying nothing.
-        if (path_.shape != PathShape::Circle)
+        if (pathCorners(path_.shape) > 0)
             ImGui::TextDisabled(
                 "corner fillet %.0f mm (the %.2f m/s\xc2\xb2 the ball can take)",
                 filletRadius(path_) * 1000.0, path_.accel_max);

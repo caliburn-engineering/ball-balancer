@@ -7,7 +7,7 @@
 //
 // The last section is the exception, and deliberately so: `accel_max` is the
 // one thing about a path that comes from the PLANT, and a file that only ever
-// made up its own value could not catch the blend being sized off a plate
+// made up its own value could not catch the fillet being sized off a plate
 // nobody ships.  See #31.
 #include "setpoint_path.h"
 
@@ -26,7 +26,7 @@ namespace {
 
 /// A round number standing in for what the plate can give the ball — the
 /// shipped geometry answers 1.888 m/s^2, and the arithmetic below is about the
-/// blend rather than about that plate.  The last section pins the real one.
+/// fillet rather than about that plate.  The last section pins the real one.
 constexpr double kSomeAccel = 2.0;
 
 SetpointPath shape(PathShape s, double r = 0.12, double period = 10.0,
@@ -37,11 +37,6 @@ SetpointPath shape(PathShape s, double r = 0.12, double period = 10.0,
     p.period_s = period;
     p.accel_max = accel_max;
     return p;
-}
-
-/// The corners a shape has, for the tests that need to know where a corner is.
-int cornerCount(PathShape s) {
-    return s == PathShape::Triangle ? 3 : (s == PathShape::Square ? 4 : 0);
 }
 
 // Every shape closes: a lap returns exactly where it started, at every size
@@ -84,14 +79,14 @@ void test_every_shape_reaches_its_radius() {
     }
 }
 
-// A blended polygon reaches slightly less far, because the blend cuts the
+// A filleted polygon reaches slightly less far, because the fillet cuts the
 // corner off — and by exactly `rho*(sec(pi/n) - 1)`, which is the corner's
-// distance from its own blend circle.  Worth pinning rather than bounding:
+// distance from its own fillet circle.  Worth pinning rather than bounding:
 // the size slider is still measured from the corner, and how much of the
 // corner the fillet eats is the number that says whether that is honest.
-void test_a_blended_polygon_falls_short_of_its_radius_by_the_blend() {
+void test_a_filleted_polygon_falls_short_of_its_radius_by_the_fillet() {
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
-        const int n = cornerCount(s);
+        const int n = pathCorners(s);
         for (double T : {0.0, 10.0}) {
             SetpointPath p = shape(s, kMaxPathRadius, 10.0, kSomeAccel);
             p.period_s = (T > 0.0) ? T : minPeriod(p);   // the floor, and slow
@@ -104,8 +99,8 @@ void test_a_blended_polygon_falls_short_of_its_radius_by_the_blend() {
             // Measured on the 180 mm shapes: the square gives up 12.9 mm at
             // its floor and 2.1 mm at a ten-second lap, and the triangle
             // 31.3 mm and 4.2 mm — a triangle's corner is sharper, so its
-            // blend cuts deeper into it.  `sec(pi/3) - 1` is exactly 1, which
-            // is why a triangle's shortfall IS its blend radius.
+            // fillet cuts deeper into it.  `sec(pi/3) - 1` is exactly 1, which
+            // is why a triangle's shortfall IS its fillet radius.
             ASSERT_TRUE(p.radius_m - furthest < 0.032);
         }
     }
@@ -118,7 +113,7 @@ void test_the_polygons_are_walked_at_constant_speed() {
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
         // Blended and sharp alike: the fillet changes the direction the
         // setpoint turns through, not the rate it covers ground at.  The
-        // blended sweep can include the corners, because the blended path has
+        // filleted sweep can include the corners, because the filleted path has
         // a velocity there.
         for (double a : {0.0, kSomeAccel}) {
             const SetpointPath p = shape(s, 0.12, 6.0, a);
@@ -149,18 +144,18 @@ void test_velocity_is_the_derivative_of_position() {
     }
 }
 
-// And on a blended path it holds AT the corners too, which is the whole reason
+// And on a filleted path it holds AT the corners too, which is the whole reason
 // the geometry is filleted rather than the velocity slewed.  Slewing
 // `pathVelocity` alone would have made this test fail at every corner — the
 // reference velocity would have stopped being the reference position's
 // derivative, which is a new lie in exactly the place #31 is removing one.
-void test_the_blend_keeps_the_velocity_the_position_s_derivative_at_the_corners() {
+void test_the_fillet_keeps_the_velocity_the_position_s_derivative_at_the_corners() {
     const double h = 1e-7;
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
-        const int n = cornerCount(s);
+        const int n = pathCorners(s);
         const SetpointPath p = shape(s, 0.12, 4.0, kSomeAccel);
         // Straight through each corner's phase, and either side of the joins
-        // where a blend meets a straight.
+        // where a fillet meets a straight.
         for (int k = 0; k < n; ++k) {
             for (double off : {-1e-3, -1e-5, 0.0, 1e-5, 1e-3}) {
                 const double u = k / static_cast<double>(n) + off;
@@ -173,7 +168,7 @@ void test_the_blend_keeps_the_velocity_the_position_s_derivative_at_the_corners(
 }
 
 // A SHARP corner is a step in the reference velocity — that is what a corner
-// means.  Kept, because it is the thing the blend is measured against: #31
+// means.  Kept, because it is the thing the fillet is measured against: #31
 // reversed the claim that the step was harmless, not the claim that it is
 // there.  `accel_max = 0` is the reference this code drove before the fillet.
 void test_a_sharp_corner_is_a_step_in_the_reference_velocity() {
@@ -186,12 +181,12 @@ void test_a_sharp_corner_is_a_step_in_the_reference_velocity() {
     ASSERT_NEAR(before.norm(), after.norm(), 1e-9);
 }
 
-// And a blended one is not.  The reference velocity turns through the same
-// right angle over the blend instead of between two samples of it, so the
+// And a filleted one is not.  The reference velocity turns through the same
+// right angle over the fillet instead of between two samples of it, so the
 // direction moves continuously and the speed never changes at all.
-void test_a_blended_corner_turns_the_reference_velocity_continuously() {
+void test_a_filleted_corner_turns_the_reference_velocity_continuously() {
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
-        const int n = cornerCount(s);
+        const int n = pathCorners(s);
         const SetpointPath p = shape(s, 0.12, 4.0, kSomeAccel);
         const double speed = pathLength(p) / p.period_s;
         for (int k = 0; k < n; ++k) {
@@ -211,8 +206,8 @@ void test_a_blended_corner_turns_the_reference_velocity_continuously() {
         sharp.accel_max = 0.0;
         ASSERT_TRUE((pathVelocity(sharp, 1e-6) - pathVelocity(sharp, -1e-6)).norm() >
                     1.0 * pathLength(sharp) / sharp.period_s);
-        // The turn still happens — it is spread over the blend, not removed.
-        // Over one corner's blend the velocity comes round by the full
+        // The turn still happens — it is spread over the fillet, not removed.
+        // Over one corner's fillet the velocity comes round by the full
         // exterior angle, 2*pi/n.
         const double half = 0.5 / n * (filletRadius(p) * 2.0 * M_PI / n) /
                             (pathLength(p) / n);
@@ -224,10 +219,10 @@ void test_a_blended_corner_turns_the_reference_velocity_continuously() {
 }
 
 // The number the whole ticket is: `rho = v^2 / a_max`, at the speed the path is
-// actually walked — which is the speed of the BLENDED path, since blending it
+// actually walked — which is the speed of the BLENDED path, since filleting it
 // shortened it.  Solved rather than iterated, so this checks the fixed point
 // holds rather than that an iteration converged.
-void test_the_blend_radius_is_v_squared_over_a_max() {
+void test_the_fillet_radius_is_v_squared_over_a_max() {
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
         for (double r : {0.02, 0.06, 0.12, kMaxPathRadius}) {
             for (double T : {2.0, 5.0, 30.0}) {
@@ -242,10 +237,10 @@ void test_the_blend_radius_is_v_squared_over_a_max() {
 // Which means it shrinks away on a slow lap and opens up on a fast one — #24's
 // bandwidth argument made visible in the TARGET rather than inferred from the
 // ball's overshoot.
-void test_the_blend_grows_as_the_lap_tightens() {
+void test_the_fillet_grows_as_the_lap_tightens() {
     const SetpointPath fast = shape(PathShape::Square, kMaxPathRadius, 4.0, kSomeAccel);
     const SetpointPath slow = shape(PathShape::Square, kMaxPathRadius, 30.0, kSomeAccel);
-    // Measured: 30.5 mm at a four-second lap and 0.58 mm at thirty.  Under a
+    // Measured: 29.3 mm at a four-second lap and 0.57 mm at thirty.  Under a
     // millimetre is a corner nobody can see, which is the right answer for a
     // lap slow enough that the ball has no trouble with one.
     ASSERT_TRUE(filletRadius(fast) > 0.028 && filletRadius(fast) < 0.033);
@@ -256,9 +251,9 @@ void test_the_blend_grows_as_the_lap_tightens() {
 }
 
 // The reference's own acceleration, which is what "feasible" means here: the
-// blend turns at exactly `a_max` and the straights do not turn at all, so the
+// fillet turns at exactly `a_max` and the straights do not turn at all, so the
 // most the reference ever asks of the ball is the most the plate can give it.
-void test_the_blended_reference_never_exceeds_a_max() {
+void test_the_filleted_reference_never_exceeds_a_max() {
     const double h = 1e-6;
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
         const SetpointPath p = shape(s, kMaxPathRadius, 4.0, kSomeAccel);
@@ -269,7 +264,7 @@ void test_the_blended_reference_never_exceeds_a_max() {
                 (pathVelocity(p, u + h) - pathVelocity(p, u - h)) / (2 * h * p.period_s);
             worst = std::max(worst, a.norm());
         }
-        // Exactly `a_max` on the blends, to the difference's own resolution.
+        // Exactly `a_max` on the fillets, to the difference's own resolution.
         ASSERT_NEAR(worst, kSomeAccel, 1e-4);
     }
 
@@ -284,18 +279,18 @@ void test_the_blended_reference_never_exceeds_a_max() {
     ASSERT_TRUE(step.norm() > 1e4 * kSomeAccel);
 }
 
-// The blend has a ceiling: the polygon's inradius, where the blends meet each
+// The fillet has a ceiling: the polygon's inradius, where the fillets meet each
 // other and the shape has become its own incircle.  Nothing the sliders offer
 // comes near it — the 180 mm square asks 33 mm against a 127 mm cap — but the
 // cap is what makes an absurd `accel_max` degrade into a circle rather than
 // into a shape that folds through itself.
-void test_the_blend_is_capped_at_the_incircle() {
+void test_the_fillet_is_capped_at_the_incircle() {
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
-        const int n = cornerCount(s);
+        const int n = pathCorners(s);
         const SetpointPath p = shape(s, 0.12, 10.0, 1e-6);   // an absurdly weak plate
         const double inradius = 0.12 * std::cos(M_PI / n);
         ASSERT_NEAR(filletRadius(p), inradius, 1e-12);
-        // Fully blended IS the incircle: constant radius, and a perimeter to
+        // Fully filleted IS the incircle: constant radius, and a perimeter to
         // match.
         for (int i = 0; i < 1000; ++i)
             ASSERT_NEAR(pathPoint(p, i / 1000.0).norm(), inradius, 1e-9);
@@ -306,30 +301,30 @@ void test_the_blend_is_capped_at_the_incircle() {
 // Blending shortens the path, because the two tangent lengths a corner gives
 // up are longer than the arc it gets back.  That is why the lap floor comes
 // DOWN — a path with rounded corners has less ground to cover at the same cap.
-void test_a_blended_polygon_is_shorter_and_so_is_its_fastest_lap() {
+void test_a_filleted_polygon_is_shorter_and_so_is_its_fastest_lap() {
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
-        const int n = cornerCount(s);
+        const int n = pathCorners(s);
         SetpointPath sharp = shape(s, kMaxPathRadius, 4.0);
-        SetpointPath blended = sharp;
-        blended.accel_max = kSomeAccel;
+        SetpointPath filleted = sharp;
+        filleted.accel_max = kSomeAccel;
 
-        const double rho = filletRadius(blended);
+        const double rho = filletRadius(filleted);
         const double saved = rho * (2.0 * n * std::tan(M_PI / n) - 2.0 * M_PI);
-        ASSERT_NEAR(pathLength(sharp) - pathLength(blended), saved, 1e-12);
-        ASSERT_TRUE(pathLength(blended) < pathLength(sharp));
+        ASSERT_NEAR(pathLength(sharp) - pathLength(filleted), saved, 1e-12);
+        ASSERT_TRUE(pathLength(filleted) < pathLength(sharp));
 
         // And the floor: measured, the 180 mm square's fastest offered lap
         // moves from 4.07 s to 3.86 s.
-        ASSERT_TRUE(minPeriod(blended) < minPeriod(sharp));
-        // The floor is a fixed point of a circular definition — the blend sets
-        // the length, the length sets the lap, the lap sets the blend — so the
+        ASSERT_TRUE(minPeriod(filleted) < minPeriod(sharp));
+        // The floor is a fixed point of a circular definition — the fillet sets
+        // the length, the length sets the lap, the lap sets the fillet — so the
         // thing to check is that it closes: a path AT its floor runs at exactly
         // the cap.
-        blended.period_s = minPeriod(blended);
-        ASSERT_NEAR(pathLength(blended) / blended.period_s, kMaxSetpointSpeed, 1e-12);
+        filleted.period_s = minPeriod(filleted);
+        ASSERT_NEAR(pathLength(filleted) / filleted.period_s, kMaxSetpointSpeed, 1e-12);
     }
     // Except where `kMinLapSeconds` is the binding bound instead, which is the
-    // small paths — there the floor is two seconds whatever the blend does.
+    // small paths — there the floor is two seconds whatever the fillet does.
     SetpointPath small = shape(PathShape::Square, 0.02, 10.0, kSomeAccel);
     ASSERT_NEAR(minPeriod(small), kMinLapSeconds, 1e-12);
 }
@@ -489,8 +484,8 @@ void test_changing_the_size_moves_the_setpoint_radially_only() {
 }
 
 // The same slider on a BLENDED path, which cannot be exactly radial and is not
-// claimed to be: the blend is set by speed rather than by size, so growing the
-// path changes the blend as well as the shape, and the setpoint slides very
+// claimed to be: the fillet is set by speed rather than by size, so growing the
+// path changes the fillet as well as the shape, and the setpoint slides very
 // slightly around as well as outward.
 //
 // The promise the slider actually makes is that the target does not JUMP, and
@@ -498,7 +493,7 @@ void test_changing_the_size_moves_the_setpoint_radially_only() {
 // 180 mm moves the setpoint off its own ray by at most 3.0 degrees and 0.8 mm.
 // Against the 160 mm it travels outward, that is the target sliding to the new
 // path rather than being thrown to a different part of it.
-void test_the_size_slider_barely_rotates_a_blended_setpoint() {
+void test_the_size_slider_barely_rotates_a_filleted_setpoint() {
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
         for (int i = 0; i < 200; ++i) {
             Run r;
@@ -609,10 +604,10 @@ void test_the_nearest_phase_is_actually_the_nearest() {
         Eigen::Vector2d(0.0, -0.2),   Eigen::Vector2d(0.001, 0.0),
         Eigen::Vector2d(0.4, 0.4),    Eigen::Vector2d(-0.07, -0.02),
     };
-    // Blended as well as sharp: the blended answer has to consider the arcs,
+    // Blended as well as sharp: the filleted answer has to consider the arcs,
     // and the nearest point on an arc is very often in the middle of one — a
     // walk that only ever offered the straights would be wrong by up to the
-    // blend radius, which is 33 mm at the settings the sliders reach.
+    // fillet radius, which is 33 mm at the settings the sliders reach.
     for (double a : {0.0, kSomeAccel}) {
         for (PathShape s : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
             const SetpointPath p = shape(s, 0.12, 4.0, a);
@@ -663,7 +658,7 @@ void test_the_outline_is_drawable() {
     ASSERT_EQ((int)pts.cols(), 0);
 }
 
-// And a blended one is drawn blended.  A square outlined with sharp corners
+// And a filleted one is drawn filleted.  A square outlined with sharp corners
 // over a setpoint that rounds them is a picture of a path the ball is not
 // being sent round — the visitor would read the gap at the corner as the
 // controller failing rather than as the corner not being there.
@@ -676,7 +671,7 @@ void test_the_outline_draws_the_path_the_setpoint_runs() {
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
         const SetpointPath p = shape(s, kMaxPathRadius, 4.0, kSomeAccel);
         pathOutline(p, 64, &pts);
-        ASSERT_TRUE(pts.cols() > cornerCount(s) + 1);        // blends sampled
+        ASSERT_TRUE(pts.cols() > pathCorners(s) + 1);        // fillets sampled
         ASSERT_NEAR((pts.col(0) - pts.col(pts.cols() - 1)).norm(), 0.0, 1e-12);
         for (int i = 0; i < pts.cols(); ++i) {
             const Eigen::Vector2d at = pts.col(i);
@@ -704,7 +699,7 @@ void test_the_outline_draws_the_path_the_setpoint_runs() {
 // ---------------------------------------------------------------------------
 //
 // Everything above makes up its own number for what the plate can give the
-// ball.  These do not: the blend is only feasible if the number is the real
+// ball.  These do not: the fillet is only feasible if the number is the real
 // one, and "derived from the plant rather than chosen" is the claim that makes
 // it a bound instead of a taste.
 
@@ -734,10 +729,10 @@ void test_a_max_is_the_ball_s_own_acceleration_at_the_swept_tilt() {
                 1e-15);
 }
 
-// The tilt really is the largest one the Jacobian is still trusted at: under
-// the threshold at `theta_max`, and over it — or off the mechanism entirely —
-// just above.  Without both halves a sweep that returned zero would pass.
-void test_the_swept_tilt_sits_on_the_condition_threshold() {
+// The tilt really is the largest one the plate can hold and be believed at:
+// the predicate holds there and fails just past it.  Both halves, because a
+// sweep that returned zero would pass either one alone.
+void test_the_swept_tilt_is_the_last_one_that_holds() {
     const auto models = getBuiltinModels();
     const auto& e = cascadeModel(models);
     const TableKinematics tk(cascadeMechanism(e.params));
@@ -746,30 +741,99 @@ void test_the_swept_tilt_sits_on_the_condition_threshold() {
         tk.max_conditioned_tilt(z_c, kRatesUntrustworthyAbove);
     ASSERT_TRUE(theta_max > 0.0);
 
-    const auto holds = [&](double tilt) {
+    // The two halves of the predicate, asked separately, so that which of them
+    // binds is something this file can state rather than assume.
+    const auto reachable = [&](double tilt) {
         for (int i = 0; i < 180; ++i) {
             const TablePose pose =
                 TableKinematics::tilted_pose(tilt, 2.0 * M_PI * i / 180.0, z_c);
             for (int leg = 0; leg < 3; ++leg) {
                 const auto a = tk.inverse_kinematics_leg(leg, pose);
                 if (!a) return false;
-                const TableParams& q = tk.params();
-                if (*a < q.alpha_min || *a > q.alpha_max) return false;
+                if (*a < tk.params().alpha_min || *a > tk.params().alpha_max)
+                    return false;
             }
+        }
+        return true;
+    };
+    const auto trusted = [&](double tilt) {
+        for (int i = 0; i < 180; ++i) {
+            const TablePose pose =
+                TableKinematics::tilted_pose(tilt, 2.0 * M_PI * i / 180.0, z_c);
             const IKResult ik = tk.inverse_kinematics(pose);
             if (!(tk.condition_number(ik.alpha, pose) < kRatesUntrustworthyAbove))
                 return false;
         }
         return true;
     };
-    ASSERT_TRUE(holds(theta_max));
-    // A tenth of a degree past it, in some direction, the plate is either out
-    // of reach or no longer to be believed.
-    ASSERT_TRUE(!holds(theta_max + 0.1 * M_PI / 180.0));
+
+    ASSERT_TRUE(reachable(theta_max) && trusted(theta_max));
+    // A tenth of a degree past it, one of the two has given way.
+    const double past = theta_max + 0.1 * M_PI / 180.0;
+    ASSERT_TRUE(!reachable(past) || !trusted(past));
 
     // And the threshold is the one this repository already argued for, not a
     // second opinion about when the mechanism is in trouble.
     ASSERT_NEAR(kRatesUntrustworthyAbove, 20.0, 1e-15);
+}
+
+// **Which of the two binds is a finding, and #31 expected the other one.**
+//
+// The ticket says "the workspace maximum is explicitly not the answer: the
+// workspace edge is precisely where the condition number blows up".  Measured,
+// the blow-up is real and it is 1.5 degrees OUTSIDE the reachable set, so on
+// the shipped plate the travel binds first and `a_max` IS the workspace
+// maximum.  Asserted rather than written in a comment, because it is the sort
+// of claim that quietly stops being true.
+void test_on_the_shipped_plate_it_is_the_travel_that_binds() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+    const double home = cascadeHomeLegAngle(e.params);
+    const TableKinematics tk(cascadeMechanism(e.params));
+    const double z_c = tk.home_pose(home).z_c;
+
+    // Where each criterion would stop, on its own.
+    const double reach = tk.max_conditioned_tilt(z_c, 1e30);
+    const double both = tk.max_conditioned_tilt(z_c, kRatesUntrustworthyAbove);
+    // Measured: 15.63 degrees either way — the condition line is never
+    // reached, so raising the limit to absurdity changes nothing.
+    ASSERT_NEAR(both, reach, 1e-12);
+    ASSERT_NEAR(both * 180.0 / M_PI, 15.63, 0.05);
+}
+
+// Which is exactly why the gate has to be tested somewhere it DOES bind, or
+// this suite would go on passing with the condition test deleted.
+//
+// Two places it binds, both measured.  A lower limit bites at once on the
+// shipped plate — the criterion is live, it is simply not the tighter of the
+// two at 20.  And at 210 mm legs it binds outright at the shipped threshold:
+// the plate reaches 21.80 degrees and is only to be believed to 20.63.  That
+// is the property the gate exists for — a longer leg must not buy acceleration
+// by reaching into rates nobody should trust.
+void test_the_condition_gate_binds_where_the_mechanism_is_weaker() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+    const double home = cascadeHomeLegAngle(e.params);
+
+    const TableKinematics shipped(cascadeMechanism(e.params));
+    const double z_c = shipped.home_pose(home).z_c;
+    const double at_20 = shipped.max_conditioned_tilt(z_c, kRatesUntrustworthyAbove);
+    // Measured: 15.51 degrees at a limit of 15, 13.66 at 10.
+    ASSERT_TRUE(shipped.max_conditioned_tilt(z_c, 15.0) < at_20);
+    ASSERT_TRUE(shipped.max_conditioned_tilt(z_c, 10.0) <
+                shipped.max_conditioned_tilt(z_c, 15.0));
+
+    TableParams longer = cascadeMechanism(e.params);
+    longer.L1 = 0.21;
+    longer.L2 = 0.21;
+    const TableKinematics big(longer);
+    const double big_z = big.home_pose(home).z_c;
+    const double trusted = big.max_conditioned_tilt(big_z, kRatesUntrustworthyAbove);
+    const double reach = big.max_conditioned_tilt(big_z, 1e30);
+    // The gate really is the tighter of the two here, by over a degree.
+    ASSERT_TRUE(trusted < reach - 0.5 * M_PI / 180.0);
+    ASSERT_NEAR(trusted * 180.0 / M_PI, 20.68, 0.1);
+    ASSERT_NEAR(reach * 180.0 / M_PI, 21.80, 0.1);
 }
 
 // A derived property of the plant moves when the plant does — which is the
@@ -807,22 +871,22 @@ int main() {
     test_every_path_closes();
     test_no_path_leaves_its_radius();
     test_every_shape_reaches_its_radius();
-    test_a_blended_polygon_falls_short_of_its_radius_by_the_blend();
+    test_a_filleted_polygon_falls_short_of_its_radius_by_the_fillet();
     test_the_polygons_are_walked_at_constant_speed();
     test_velocity_is_the_derivative_of_position();
-    test_the_blend_keeps_the_velocity_the_position_s_derivative_at_the_corners();
+    test_the_fillet_keeps_the_velocity_the_position_s_derivative_at_the_corners();
     test_a_sharp_corner_is_a_step_in_the_reference_velocity();
-    test_a_blended_corner_turns_the_reference_velocity_continuously();
-    test_the_blend_radius_is_v_squared_over_a_max();
-    test_the_blend_grows_as_the_lap_tightens();
-    test_the_blended_reference_never_exceeds_a_max();
-    test_the_blend_is_capped_at_the_incircle();
-    test_a_blended_polygon_is_shorter_and_so_is_its_fastest_lap();
+    test_a_filleted_corner_turns_the_reference_velocity_continuously();
+    test_the_fillet_radius_is_v_squared_over_a_max();
+    test_the_fillet_grows_as_the_lap_tightens();
+    test_the_filleted_reference_never_exceeds_a_max();
+    test_the_fillet_is_capped_at_the_incircle();
+    test_a_filleted_polygon_is_shorter_and_so_is_its_fastest_lap();
     test_the_degenerate_cases_behave();
     test_changing_the_lap_leaves_the_setpoint_where_it_is();
     test_the_reference_velocity_steps_on_a_lap_change();
     test_changing_the_size_moves_the_setpoint_radially_only();
-    test_the_size_slider_barely_rotates_a_blended_setpoint();
+    test_the_size_slider_barely_rotates_a_filleted_setpoint();
     test_a_lap_change_takes_effect_from_that_moment();
     test_changing_the_shape_picks_up_where_the_setpoint_is();
     test_carrying_the_phase_across_a_shape_change_would_be_far_worse();
@@ -831,7 +895,9 @@ int main() {
     test_the_outline_is_drawable();
     test_the_outline_draws_the_path_the_setpoint_runs();
     test_a_max_is_the_ball_s_own_acceleration_at_the_swept_tilt();
-    test_the_swept_tilt_sits_on_the_condition_threshold();
+    test_the_swept_tilt_is_the_last_one_that_holds();
+    test_on_the_shipped_plate_it_is_the_travel_that_binds();
+    test_the_condition_gate_binds_where_the_mechanism_is_weaker();
     test_a_max_moves_with_the_legs_and_the_fillet_moves_with_it();
     std::printf("test_setpoint_path: all passed\n");
     return 0;

@@ -52,14 +52,13 @@ Track follow(const ModelEntry& e, const Eigen::MatrixXd& K,
              const SetpointPath& asked, bool feedforward, double duration) {
     const SimPlate plate = cascadePlate(e.params);
 
-    // The blend the step is going to stamp on anyway, taken here as well so
+    // The fillet the step is going to stamp on anyway, taken here as well so
     // that the two things this harness reads the path for itself — where to
     // start the ball, and where the held setpoint is each frame — are on the
     // same curve the loop is being driven round.  Reading it off the plate
     // rather than copying a number is the point: a harness with its own idea
     // of `accel_max` would be measuring a path the application never runs.
-    SetpointPath path = asked;
-    path.accel_max = plate.maxBallAccel();
+    const SetpointPath path = plate.feasible(asked);
 
     SimInput in;
     in.design = cascadeDesign(e.params);
@@ -125,7 +124,7 @@ void test_every_offered_setting_keeps_the_ball() {
     const Eigen::MatrixXd K = defaultGain(e);
     const TableParams tp = cascadeMechanism(e.params);
     const double rim = tp.R_table - kBallRadius;
-    // The lap floor moves with the blend — a path that rounds its corners has
+    // The lap floor moves with the fillet — a path that rounds its corners has
     // less ground to cover — so the floor has to be asked of a path that knows
     // what the plate can do.  See `minPeriod`.
     const double a_max = cascadePlate(e.params).maxBallAccel();
@@ -156,7 +155,7 @@ void test_every_offered_setting_keeps_the_ball() {
     // 21 mm — at the fastest triangle, which is the setting that is SUPPOSED
     // to look hard.
     //
-    // Both numbers came down when the corners were blended (#31).  The mean
+    // Both numbers came down when the corners were filleted (#31).  The mean
     // error was 36 mm and is 21; the reach was 195 mm and is 192.  Neither is
     // the point of the fillet and both are consequences of it: the reference
     // stopped asking for a turn the ball cannot make, so the ball stopped
@@ -207,7 +206,7 @@ void test_the_reference_never_asks_for_more_than_the_ball_can_do() {
                                  (f.setpoint_velocity - previous).norm() / in.dt);
             previous = f.setpoint_velocity;
         }
-        // A frame straddling the join between a blend and a straight averages
+        // A frame straddling the join between a fillet and a straight averages
         // the two, so a 60 Hz difference can only ever UNDER-read the peak —
         // it cannot manufacture one.  Measured 1.87 m/s^2 against the 1.888
         // the plate can give.  The slack is for the arithmetic, not for a
@@ -267,7 +266,7 @@ void test_a_corner_is_harder_than_a_curve() {
     // corner that does it.
     //
     // **This was 14.2 mm and nearly three times, before the corners were
-    // blended.**  The 3.7 mm fillet a 120 mm square at an eight-second lap
+    // filleted.**  The 3.7 mm fillet a 120 mm square at an eight-second lap
     // takes is small enough that the shape still reads as a square and the
     // corner is still visibly the hard part — the demo keeps its point — but
     // half of what the ball used to lose there was the reference asking for a
@@ -275,12 +274,12 @@ void test_a_corner_is_harder_than_a_curve() {
     //
     // The assertion is a RATIO rather than either number, because the square's
     // figure is a peak sampled at 60 Hz near the tightest part of the path.
-    // The blend makes it far less frame-sensitive than the step did — the old
+    // The fillet makes it far less frame-sensitive than the step did — the old
     // number swung between 14.2 and 14.9 mm on a phase perturbation of one bit
     // — but it is still a peak, and a fourth significant figure on it would be
     // a claim about frame alignment rather than about the corner.
     ASSERT_TRUE(q.max_error > 1.3 * c.max_error);
-    // And the blend really did take the bulk of it: a sharp corner put the
+    // And the fillet really did take the bulk of it: a sharp corner put the
     // square nearly three times the circle, so anything at or above that is
     // the fillet having been lost.
     ASSERT_TRUE(q.max_error < 2.2 * c.max_error);

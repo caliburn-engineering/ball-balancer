@@ -222,28 +222,47 @@ public:
     /// direction, because a bound that holds only where the mechanism happens
     /// to be strong is not a bound on what the plate can be asked for.
     ///
-    /// Swept rather than solved, and swept UPWARD from level rather than
-    /// bisected.  Above the reachable tilt the leg angles that come back are
-    /// clamped ones for a pose the mechanism does not have, and the condition
-    /// number computed there is arithmetic about a configuration that does not
-    /// exist: measured on the shipped geometry it falls back under 100 at 22
-    /// degrees having passed 19 500 at 20.  A bisection would find that and
-    /// believe it.  Marching from level and stopping at the first failure
-    /// cannot, because it never evaluates past the edge.
-    ///
     /// A leg is required to have a real solution AND to be within its travel,
-    /// rather than `inverse_kinematics`'s clamp being accepted: a clamped leg
+    /// rather than `inverse_kinematics`'s clamp being accepted.  A clamped leg
     /// triple is a different pose from the one whose Jacobian is being asked
-    /// about.
+    /// about, and the difference is not academic: evaluated at the clamped
+    /// triples instead, the condition number on the shipped geometry passes
+    /// **19 500 at 20 degrees and falls back under 100 at 22**, which is
+    /// arithmetic about a configuration that does not exist.
     ///
-    /// Measured on the shipped geometry at the home heave, with the limit at
-    /// `kRatesUntrustworthyAbove`: **15.63 degrees**, where the condition
-    /// number is 15.7 and the outermost leg is within 0.2 degrees of the end
-    /// of its travel.  The two arrive together, which is the same statement
-    /// as "the workspace edge is where the condition number blows up" — the
-    /// condition gate is what makes this a DERIVED number that moves with the
-    /// geometry rather than a workspace literal that has to be re-measured by
-    /// hand every time a leg length changes.
+    /// **Swept upward from level, then halved inside the bracket the sweep
+    /// found.**  Bisecting the whole range would assume the predicate is one
+    /// unbroken run from level, and it is a conjunction of a reachability set
+    /// and a condition sublevel set with neither guaranteed convex in tilt.
+    /// The march returns the largest tilt with an unbroken run of successes
+    /// beneath it, which is what a bound wants rather than merely some root.
+    /// Measured on the shipped geometry the predicate does flip exactly once
+    /// over 0 to 60 degrees, so the two agree here — the march costs 2.3 ms
+    /// and does not rely on that continuing to be true.
+    ///
+    /// 36 directions because the answer stops moving long before then:
+    /// measured, every fan from 12 to 144 gives the same tilt to five decimal
+    /// places and 360 moves it by 0.0002 degrees.
+    ///
+    /// **Which of the two criteria binds is a property of the geometry, and on
+    /// the shipped plate it is the reachability one.**  At 150 mm legs the
+    /// plate runs out of travel at 15.63 degrees, where the condition number is
+    /// 15.7 — the "under 20" line would not have bound until 17.10.  The
+    /// condition gate takes over from about 200 mm legs: at 210 it binds at
+    /// 20.63 against 21.80 degrees of reach.
+    ///
+    /// That reverses what [#31](https://github.com/caliburn-engineering/caliburn/issues/31)
+    /// expected — "the workspace maximum is explicitly not the answer: the
+    /// workspace edge is precisely where the condition number blows up" — and
+    /// the measurement is recorded rather than the expectation.  The blow-up is
+    /// real and it is 1.5 degrees OUTSIDE the reachable set, so on this plate
+    /// the workspace maximum is exactly what `a_max` comes to.
+    ///
+    /// The gate is kept, and is not decorative: lowering `condition_limit`
+    /// moves the answer at once (15.51 degrees at 15, 13.66 at 10), it binds
+    /// outright on longer legs, and it is what stops a longer leg buying
+    /// acceleration by reaching into configurations the rates cannot be
+    /// believed in.  Reach alone would have handed it that.
     double max_conditioned_tilt(double z_c, double condition_limit) const;
 
     /// Determinant of the constraint Jacobian w.r.t. pose (J_pose)

@@ -908,17 +908,25 @@ sampled at 60 Hz near the tightest part of the path, so which frame lands
 nearest the corner still moves it a little.  `test_trajectory` asserts the
 ratio for that reason, and a fourth significant figure on the square would be
 a claim about frame alignment rather than about the controller.  It was 14 mm
-and nearly three times before the corners were blended — see below.
+and nearly three times before the corners were filleted — see below.
 
 Decided in [#24](https://github.com/caliburn-engineering/caliburn/issues/24).
+
+### Fillet
+
+The circular arc a polygon's corner is filleted with, radius `v^2 / a_max`.
+**Fillet** throughout — in `filletRadius`, in the internals, and in the panel's
+readout.  Not *fillet*, *round* or *smooth*: it is one word for one thing, and
+the synonyms invite a reader to think the velocity is being smoothed, which is
+exactly the thing #31 decided against (see below).
 
 ### The corner is filleted, not a step
 
 **A sharp corner puts a step into the reference velocity, and that step is a
 modelling error rather than a demonstration.**  The polygons' corners are
-blended with a circular fillet of radius `v^2 / a_max`, so the reference is one
+filleted with a circular fillet of radius `v^2 / a_max`, so the reference is one
 the mechanism can actually track: the setpoint's own acceleration is `a_max`
-through the blend and zero along the straights, never infinite anywhere.
+through the fillet and zero along the straights, never infinite anywhere.
 
 This reverses half of what #24 wrote on `pathVelocity`, and the words are
 quoted in the header rather than quietly dropped:
@@ -939,53 +947,75 @@ one frame against the **1.89** the plate can give the ball.
 **A fillet, not a slew.**  Slewing `pathVelocity` without touching `pathPoint`
 would make the reference velocity stop being the reference position's
 derivative — a new lie in exactly the place one was being removed, and a direct
-violation of `stepPath`'s reason for returning both together.  A circular blend
+violation of `stepPath`'s reason for returning both together.  A circular fillet
 keeps `v = dp/dt` true by construction, and `test_setpoint_path` differences the
 position straight through each corner to say so.
 
 **`a_max = (5/7)·g·sin(theta_max)`, derived rather than chosen.**  `theta_max`
-is the largest tilt whose velocity-Jacobian condition number stays under
-`kRatesUntrustworthyAbove` in every direction, found by sweeping
-`condition_number` upward from level.  That reuses the threshold this repository
-has already argued for — the contact model's trust bound and the plate panel's
-own "Poor" line — instead of inventing a second opinion about when the mechanism
-is in trouble, and it makes `a_max` a property of the plant that a leg length
-moves: **1.52 m/s² at 120 mm legs, 1.888 at the shipped 150, 2.47 at 210**.  On
-the shipped geometry `theta_max` is **15.63°**.
+is the largest tilt the plate can actually hold whose velocity-Jacobian
+condition number stays under `kRatesUntrustworthyAbove` in every direction,
+found by sweeping `condition_number` upward from level.  That reuses the
+threshold this repository has already argued for — the contact model's trust
+bound and the plate panel's own "Poor" line — instead of inventing a second
+opinion about when the mechanism is in trouble, and it makes `a_max` a property
+of the plant that a leg length moves: **1.52 m/s² at 120 mm legs, 1.888 at the
+shipped 150, 2.25 at 180, 2.47 at 210**.  On the shipped geometry `theta_max`
+is **15.63°**.
 
-The workspace maximum is deliberately not the answer, though here the two
-coincide to a fifth of a degree — the workspace edge is precisely where the
-condition number blows up.  The sweep marches upward and stops at the first
-failure rather than bisecting, because past the reachable tilt the leg angles
-that come back are clamped ones for a pose the mechanism does not have: the
-condition number there falls back under 100 at 22° having passed 19 500 at 20°,
-and a bisection would find that and believe it.
+A leg is required to have a real solution *and* to be within its travel, rather
+than `inverse_kinematics`'s clamp being accepted — a clamped leg triple is a
+different pose from the one whose Jacobian is being asked about, and the
+difference is not academic: evaluated at the clamped triples instead, the
+condition number passes **19 500 at 20°** and falls back under 100 at 22°.
+
+The sweep marches upward to find a bracket and only halves inside it.  A
+bisection over the whole range would assume the predicate is one unbroken run
+from level, and it is a conjunction of a reachability set and a condition
+sublevel set with neither guaranteed convex in tilt.  Measured, it does flip
+exactly once here, so the two agree — the march costs 2.3 ms and does not rely
+on that.
+
+> **#31 expected the condition number to bind, and on this plate it does not.**
+> The ticket says "the workspace maximum is explicitly *not* the answer: the
+> workspace edge is precisely where the condition number blows up".  Measured,
+> the blow-up is real and it sits **1.5° outside the reachable set**: at 150 mm
+> legs the plate runs out of travel at 15.63°, where the condition number is
+> 15.7, and the "under 20" line would not have bound until 17.10°.  So the
+> shipped `a_max` **is** the workspace maximum.
+>
+> The gate is kept, and is not decorative.  Lowering the limit moves the answer
+> at once (15.51° at 15, 13.66° at 10), and it binds outright from about 200 mm
+> legs — at 210 the plate reaches 21.80° and is only to be believed to 20.63°.
+> That is the property it exists for: a longer leg must not buy acceleration by
+> reaching into rates nobody should trust.  `test_setpoint_path` pins both the
+> finding and the two places the gate does bind, so neither can quietly stop
+> being true.
 
 **The fillet is sized by speed, so it grows as the lap tightens.**  On the
 180 mm square it is 33 mm at the fastest lap the sliders offer and 0.6 mm at the
 slowest — #24's bandwidth argument made visible in the *target* instead of
 inferred from the ball's overshoot.  It is capped at the polygon's inradius,
-where the blends meet and the shape becomes its own incircle; nothing the
+where the fillets meet and the shape becomes its own incircle; nothing the
 sliders reach comes near that (33 mm against a 127 mm cap).
 
 Three things move with it, and all three had to:
 
-- **`pathOutline` draws the blend.**  A square drawn with sharp corners over a
+- **`pathOutline` draws the fillet.**  A square drawn with sharp corners over a
   setpoint that rounds them is a picture of a path the ball is not being sent
   round, and the visitor would read the gap as the controller failing at the
   corner rather than as the corner not being there.
-- **`pathLength` shrinks, and so does the lap floor.**  A blend gives up two
+- **`pathLength` shrinks, and so does the lap floor.**  A fillet gives up two
   tangent lengths and gets back a shorter arc, so the 180 mm square's fastest
   offered lap moves from 4.07 s to 3.85 s.  `minPeriod` cannot ask `pathLength`
   for that — the length depends on the lap — so it solves the fixed point in
-  closed form at the speed cap, where the blend radius is known.
-- **`phaseNearest` considers the arcs.**  The nearest point on a blend is very
+  closed form at the speed cap, where the fillet radius is known.
+- **`phaseNearest` considers the arcs.**  The nearest point on a fillet is very
   often in the middle of one, so a walk that only offered the straights would be
-  wrong by up to the blend radius.
+  wrong by up to the fillet radius.
 
-**A filleted polygon does not quite reach its `radius_m`**, since the blend cuts
+**A filleted polygon does not quite reach its `radius_m`**, since the fillet cuts
 the corner off: 14 mm short for the 180 mm square at its floor, 33 mm for the
-triangle, whose sharper corner gives up its whole blend radius.  The size slider
+triangle, whose sharper corner gives up its whole fillet radius.  The size slider
 is still measured from the corner, because the corner is what the shape is.
 
 **`accel_max` is a property of the plant, and `stepSim` stamps it.**  The step
@@ -1014,6 +1044,15 @@ from the decision record's D1–D5.
 > angular rate the plate cannot follow however short the distance.  Neither
 > implies the other.  A demo whose controls include a setting that breaks it is
 > not offering a choice, it is offering a trap.
+>
+> **Both figures were measured against a reference that slammed the legs at
+> every corner, and neither has been re-measured since #31 filleted them.**
+> What has been re-measured is the sweep the cap exists to protect: all 24
+> offered settings keep the ball, and it now reaches 192 mm rather than 195.
+> Whether the cap itself can come up belongs to the ticket that closes #23,
+> which owns re-measuring it (D16).  The numbers are left standing rather than
+> quietly adjusted, because a bound whose stated reason has moved is worth
+> noticing.
 
 ### Rolling-friction dead band
 

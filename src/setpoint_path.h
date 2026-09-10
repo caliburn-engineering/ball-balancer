@@ -17,6 +17,14 @@ namespace caliburn {
 /// See [#24](https://github.com/caliburn-engineering/caliburn/issues/24).
 enum class PathShape { Fixed, Circle, Square, Triangle };
 
+/// How many corners a shape has: three, four, or none.
+///
+/// Public because three places outside the path arithmetic want to know — the
+/// panel, which has a line of text that only makes sense where there are
+/// corners, and two test files.  A shape-to-corners switch written out a fourth
+/// time is a fourth chance to disagree about what a `Circle` is.
+int pathCorners(PathShape s);
+
 /// A closed path for the ball setpoint to run round, in the plate's own frame.
 struct SetpointPath {
     PathShape shape = PathShape::Fixed;
@@ -26,13 +34,13 @@ struct SetpointPath {
     /// the corner rather than the edge so that every shape at the same setting
     /// reaches equally far out, which is what a visitor comparing them expects.
     ///
-    /// A filleted polygon does not quite reach it — the blend cuts the corner
+    /// A filleted polygon does not quite reach it — the fillet cuts the corner
     /// off, and what is left reaches `radius_m - rho*(sec(pi/n) - 1)`.  On the
     /// 180 mm shapes that is 14 mm for the square at its fastest offered lap
     /// and a quarter of a millimetre at its slowest; for the triangle 33 mm
     /// and half a millimetre, since `sec(pi/3) - 1` is exactly one and a
-    /// triangle therefore gives up its whole blend radius.  A sharper corner
-    /// loses more of itself to the same blend, which is the correct way round.
+    /// triangle therefore gives up its whole fillet radius.  A sharper corner
+    /// loses more of itself to the same fillet, which is the correct way round.
     ///
     /// The corner is still where the size slider is measured from, because the
     /// corner is what the shape IS — and because sizing from anything else
@@ -45,8 +53,9 @@ struct SetpointPath {
     /// round together, and the triangle is simply travelling faster to do it.
     double period_s = 10.0;
 
-    /// The most acceleration the plate can give the ball, in m/s^2, which is
-    /// what the polygons' corners are blended to be feasible against.
+    /// The most acceleration the plate can give the ball, in m/s^2.  It is
+    /// what the polygons' corners are filleted against, and so what makes the
+    /// reference one the mechanism can actually track.
     ///
     /// **A property of the plant, not of what the visitor asked for.**  It is
     /// `maxBallAccel`'s answer, and `stepSim` stamps it over whatever a caller
@@ -74,6 +83,15 @@ struct SetpointPath {
 /// So the sliders are bounded rather than left to find that out.  A demo whose
 /// controls include a setting that breaks it is not offering a choice, it is
 /// offering a trap.
+///
+/// **Both figures above were measured against a reference that slammed the
+/// legs at every corner, and neither has been re-measured since #31 filleted
+/// them.**  What HAS been re-measured is the sweep the cap exists to protect:
+/// over all 24 settings the sliders offer, the ball now reaches 192 mm and all
+/// 24 keep it — see `test_trajectory`.  Whether the cap itself can come up is
+/// a question for the ticket that closes #23, which owns re-measuring it; the
+/// two numbers are left standing here rather than quietly adjusted, because a
+/// bound whose stated reason has moved is worth noticing.
 inline constexpr double kMaxSetpointSpeed = 0.25;   ///< [m/s]
 inline constexpr double kMaxPathRadius = 0.18;      ///< [m]
 
@@ -96,7 +114,7 @@ inline constexpr double kMinLapSeconds = 2.0;
 /// `pathLength` here would be asking about the lap the caller currently has
 /// rather than the one being solved for, and the answer would move every time
 /// it was applied.  The way out is that at the cap the speed is KNOWN: the
-/// blend radius is `kMaxSetpointSpeed^2 / accel_max` whatever the lap turns
+/// fillet radius is `kMaxSetpointSpeed^2 / accel_max` whatever the lap turns
 /// out to be, so the perimeter is, so the lap that runs that perimeter at the
 /// cap is.  It is a fixed point of the circular definition, reached in closed
 /// form rather than iterated to.
@@ -106,25 +124,25 @@ inline constexpr double kMinLapSeconds = 2.0;
 /// A path that rounds its corners has less ground to cover.
 double minPeriod(const SetpointPath& p);
 
-/// The radius the polygon's corners are blended with, in metres — `v^2/a_max`
+/// The radius the polygon's corners are filleted with, in metres — `v^2/a_max`
 /// at the speed the path is actually being walked at, and zero for the shapes
 /// that have no corners.
 ///
 /// **The whole of #31 is this number.**  It is the radius of the tightest
 /// circle the ball can be asked to follow at this speed, so a reference built
 /// out of straight lines and arcs of it is one the plate can produce: the
-/// centripetal acceleration through the blend is exactly `accel_max`, and it
+/// centripetal acceleration through the fillet is exactly `accel_max`, and it
 /// is zero everywhere else.  A sharp corner is the same expression with the
 /// radius sent to zero, which is where the infinite acceleration was.
 ///
 /// It grows as the lap tightens and shrinks as the lap opens — 33 mm on the
-/// 180 mm square at its floor, 0.4 mm at a thirty-second lap — which is #24's
+/// 180 mm square at its floor, 0.6 mm at a thirty-second lap — which is #24's
 /// bandwidth argument made visible in the TARGET instead of inferred from the
 /// ball's overshoot.
 ///
-/// Capped at the polygon's inradius, `radius_m * cos(pi/n)`, where the blends
+/// Capped at the polygon's inradius, `radius_m * cos(pi/n)`, where the fillets
 /// meet and the shape has become its own incircle.  Beyond that there is no
-/// straight left to blend and the fillet would have to cut into the previous
+/// straight left to fillet and the fillet would have to cut into the previous
 /// corner.  Nothing the sliders offer comes near it — the 180 mm square's cap
 /// is 127 mm against the 33 mm it asks for — so it is a definition of the
 /// limit rather than a clamp anyone meets.
@@ -152,7 +170,7 @@ double advancePhase(double phase, double dt, double period_s);
 /// The polygons are traversed at constant SPEED, not constant angle: a corner
 /// is a change of direction, and slowing into it would hide exactly the
 /// behaviour the cornered shapes exist to show.  Constant through the fillets
-/// too — the blend changes the direction the setpoint turns through, not the
+/// too — the fillet changes the direction the setpoint turns through, not the
 /// rate it covers ground at.
 ///
 /// Linear in `radius_m` for every shape at a fixed `accel_max`, which is what
@@ -242,7 +260,7 @@ PathStep stepPath(const SetpointPath& p, double phase, double dt);
 ///
 /// Exact rather than searched.  The nearest point on a circle is the radial
 /// projection; on a filleted polygon it is the nearest of its straights'
-/// clamped projections and its blends' clamped angular ones, and there are at
+/// clamped projections and its fillets' clamped angular ones, and there are at
 /// most four of each.
 ///
 /// The exact centre is equidistant from the whole path and so has no nearest
@@ -256,15 +274,15 @@ double phaseNearest(const SetpointPath& p, const Eigen::Vector2d& target);
 /// The path's total length, for drawing it and for reasoning about speed.
 ///
 /// A function of the lap time as well as the size, on a polygon: the corners
-/// are blended, and the blend cuts the corner shorter than the two tangent
+/// are filleted, and the fillet cuts the corner shorter than the two tangent
 /// lengths it replaces.  `n*side - rho*(2n*tan(pi/n) - 2*pi)`, which is 57 mm
-/// off the 180 mm square's metre at its floor and 0.7 mm off it at a
+/// off the 180 mm square's metre at its floor and 1.0 mm off it at a
 /// thirty-second lap.
 double pathLength(const SetpointPath& p);
 
 /// Points around one lap, for drawing.  A circle gets `samples` of them; a
 /// polygon gets its straights exactly — a straight drawn as a chord of samples
-/// is a straight drawn wrong — and its blends sampled, since they are arcs and
+/// is a straight drawn wrong — and its fillets sampled, since they are arcs and
 /// an arc has no exact polyline.
 ///
 /// **The drawing has to carry the fillet.**  A square outlined with sharp
