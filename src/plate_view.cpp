@@ -91,7 +91,7 @@ PlateView::PlateView()
     // plate_ is declared first, so its params are live here: the ball's plate
       // and the drawn plate are one object, not two that have to be kept in
       // step.  It is also exactly what every test harness runs against.
-    : plate_(defaultTableParams(), kGravity),
+    : plate_(defaultTableParams(), kGravity, kHomeLegRad),
       plot_state_(kBufSize),
       s_phi_("\xcf\x86", kBufSize),                 // phi
       s_theta_("\xce\xb8", kBufSize),               // theta
@@ -119,6 +119,16 @@ PlateView::PlateView()
     // rather than a frame of it starting up.  Both errors are zero here, which
     // is what keeps the legs still — see `attract_mode.h`.
     path_ = openingPath();
+    // How tightly the setpoint may turn its corners, from the plate itself.
+    // Set once because `plate_` is built once: the geometry the visitor sees
+    // never changes under them, and a leg length that did would be a different
+    // plant, which `samePlant` already refuses to run the loop against.
+    //
+    // Here rather than only inside `stepSim` because the panel asks the path
+    // its own questions — the lap floor, the outline it draws, the phase a
+    // shape change re-seeds from — and a path answering those with sharp
+    // corners while the step drove blended ones would be two paths.
+    path_.accel_max = plate_.maxBallAccel();
     path_radius_mm_ = static_cast<float>(path_.radius_m * 1000.0);
     path_period_s_ = static_cast<float>(path_.period_s);
     sim_ = simStart(plate_, kHomeLegRad, attractStart(path_));
@@ -694,6 +704,15 @@ void PlateView::drawBalanceControls() {
         ImGui::TextDisabled("setpoint speed %.0f mm/s (max %.0f)",
                             pathLength(path_) / std::max(0.1, path_.period_s) * 1000.0,
                             kMaxSetpointSpeed * 1000.0);
+        // What the corners are being rounded by, and why.  It is the most
+        // visible thing on the plate at a fast lap, and without a word for it
+        // a filleted square reads as a square drawn wrong.  Only where there
+        // are corners: a circle would report a fillet of zero, which is a line
+        // of text saying nothing.
+        if (path_.shape != PathShape::Circle)
+            ImGui::TextDisabled(
+                "corner fillet %.0f mm (the %.2f m/s\xc2\xb2 the ball can take)",
+                filletRadius(path_) * 1000.0, path_.accel_max);
     }
 
     // The setpoint sliders stay visible and go read-only under a path, for the

@@ -1,4 +1,6 @@
 #include "table_kinematics.h"
+
+#include <algorithm>
 #include <stdexcept>
 
 // ============================================================================
@@ -442,6 +444,76 @@ double TableKinematics::condition_number(
     auto sv = svd.singularValues();
     if (sv(2) < 1e-15) return std::numeric_limits<double>::infinity();
     return sv(0) / sv(2);
+}
+
+TablePose TableKinematics::tilted_pose(double tilt_rad, double azimuth_rad,
+                                       double z_c) {
+    // The normal this pose convention produces is
+    //   n = [ sin(theta) cos(phi), -sin(phi), cos(theta) cos(phi) ],
+    // and the normal being asked for is
+    //   n = [ sin(t) cos(psi),      sin(t) sin(psi),  cos(t) ].
+    // Matching the y components gives phi outright; the x component then
+    // divides by cos(phi), which is why phi is solved first.
+    const double st = std::sin(tilt_rad);
+    const double phi = std::asin(std::clamp(-st * std::sin(azimuth_rad), -1.0, 1.0));
+    const double c_phi = std::cos(phi);
+    // |sin(t) cos(psi)| <= cos(phi) always, since cos^2(phi) = 1 - sin^2(t)
+    // sin^2(psi) >= sin^2(t) cos^2(psi).  The clamp is the arcsine's domain
+    // being defended against rounding, not a case being handled.
+    const double s_theta =
+        (c_phi > 0.0) ? std::clamp(st * std::cos(azimuth_rad) / c_phi, -1.0, 1.0)
+                      : 0.0;
+    return TablePose{phi, std::asin(s_theta), z_c};
+}
+
+double TableKinematics::max_conditioned_tilt(double z_c,
+                                             double condition_limit) const {
+    // Enough directions to catch the three-fold asymmetry the triad has, and
+    // its mirror: the worst direction on the shipped geometry sits at 125 and
+    // 235 degrees, which a coarser fan straddles.
+    constexpr int kDirections = 36;
+    constexpr double kStep = 0.5 * M_PI / 180.0;
+    constexpr double kCeiling = M_PI / 3.0;     // no plate of this family leans 60
+    constexpr int kRefinements = 12;            // 0.5 deg / 2^12, well past useful
+
+    const auto holds = [&](double tilt) {
+        for (int i = 0; i < kDirections; ++i) {
+            const TablePose pose =
+                tilted_pose(tilt, 2.0 * M_PI * i / kDirections, z_c);
+            std::array<double, 3> alpha{};
+            for (int leg = 0; leg < 3; ++leg) {
+                const std::optional<double> a = inverse_kinematics_leg(leg, pose);
+                // No solution, or one the servo cannot reach.  Both mean the
+                // plate does not have this pose, so its Jacobian is not a
+                // question about this mechanism.
+                if (!a) return false;
+                if (*a < params_.alpha_min || *a > params_.alpha_max) return false;
+                alpha[leg] = *a;
+            }
+            // Written as a negated `<` so that a non-finite condition number —
+            // which is what a singular Jacobian returns — fails rather than
+            // passing by comparing false.
+            if (!(condition_number(alpha, pose) < condition_limit)) return false;
+        }
+        return true;
+    };
+
+    if (!holds(0.0)) return 0.0;
+
+    double good = 0.0, bad = -1.0;
+    for (double tilt = kStep; tilt <= kCeiling; tilt += kStep) {
+        if (holds(tilt)) good = tilt;
+        else { bad = tilt; break; }
+    }
+    if (bad < 0.0) return good;         // never failed below the ceiling
+
+    // Only now, inside a bracket the march has already proved straddles the
+    // edge, is halving safe.
+    for (int i = 0; i < kRefinements; ++i) {
+        const double mid = 0.5 * (good + bad);
+        if (holds(mid)) good = mid; else bad = mid;
+    }
+    return good;
 }
 
 double TableKinematics::det_J_pose(

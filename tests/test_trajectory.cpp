@@ -49,8 +49,17 @@ struct Track {
 /// hide once already (#22) — a harness that recomputes the thing it is meant to
 /// be measuring is not evidence about the application.  See #30.
 Track follow(const ModelEntry& e, const Eigen::MatrixXd& K,
-             const SetpointPath& path, bool feedforward, double duration) {
+             const SetpointPath& asked, bool feedforward, double duration) {
     const SimPlate plate = cascadePlate(e.params);
+
+    // The blend the step is going to stamp on anyway, taken here as well so
+    // that the two things this harness reads the path for itself — where to
+    // start the ball, and where the held setpoint is each frame — are on the
+    // same curve the loop is being driven round.  Reading it off the plate
+    // rather than copying a number is the point: a harness with its own idea
+    // of `accel_max` would be measuring a path the application never runs.
+    SetpointPath path = asked;
+    path.accel_max = plate.maxBallAccel();
 
     SimInput in;
     in.design = cascadeDesign(e.params);
@@ -116,6 +125,10 @@ void test_every_offered_setting_keeps_the_ball() {
     const Eigen::MatrixXd K = defaultGain(e);
     const TableParams tp = cascadeMechanism(e.params);
     const double rim = tp.R_table - kBallRadius;
+    // The lap floor moves with the blend — a path that rounds its corners has
+    // less ground to cover — so the floor has to be asked of a path that knows
+    // what the plate can do.  See `minPeriod`.
+    const double a_max = cascadePlate(e.params).maxBallAccel();
 
     double worst_radius = 0.0, worst_error = 0.0;
     for (PathShape s : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
@@ -123,6 +136,7 @@ void test_every_offered_setting_keeps_the_ball() {
             SetpointPath p;
             p.shape = s;
             p.radius_m = r_mm * 1e-3;
+            p.accel_max = a_max;
             // The fastest the UI allows at this size, and the slowest.
             for (double T : {minPeriod(p), 30.0}) {
                 p.period_s = T;
@@ -137,11 +151,69 @@ void test_every_offered_setting_keeps_the_ball() {
             }
         }
     }
-    // Measured: the ball reaches 195 mm on the largest path, against the 280 mm
-    // the plate has, and its mean error is 36 mm at the very fastest setting
-    // the sliders offer — which is the setting that is SUPPOSED to look hard.
+    // Measured, all 24 settings kept: the ball reaches 192 mm on the largest
+    // path, against the 280 mm the plate has, and its worst mean error is
+    // 21 mm — at the fastest triangle, which is the setting that is SUPPOSED
+    // to look hard.
+    //
+    // Both numbers came down when the corners were blended (#31).  The mean
+    // error was 36 mm and is 21; the reach was 195 mm and is 192.  Neither is
+    // the point of the fillet and both are consequences of it: the reference
+    // stopped asking for a turn the ball cannot make, so the ball stopped
+    // being thrown wide of one.
     ASSERT_TRUE(worst_radius < 0.24);
-    ASSERT_TRUE(worst_error < 0.05);
+    ASSERT_TRUE(worst_error < 0.03);
+}
+
+// What the corner actually hands the actuator, which is the whole of #31.
+//
+// A sharp corner turns the reference velocity through a right angle between
+// two frames.  Sampled at 60 Hz on the fastest square that is 0.354 m/s in one
+// frame — an implied 21 m/s^2, against the 1.89 the plate can give the ball —
+// and the reference is asking for infinity, the sampling is merely what stops
+// the number being one.  That impulse reaches the legs through K's velocity
+// columns whether or not the ball can follow it.
+//
+// Blended, the reference's own acceleration is `v^2/rho = accel_max` through
+// the corner and zero along the straights, by construction.  This measures it
+// where it matters — off `SimReport::setpoint_velocity`, the quantity the loop
+// was actually handed, rather than off the path re-read afterwards.
+void test_the_reference_never_asks_for_more_than_the_ball_can_do() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+    const SimPlate plate = cascadePlate(e.params);
+    const double a_max = plate.maxBallAccel();
+
+    SimInput in;
+    in.design = cascadeDesign(e.params);
+    in.design.K = defaultGain(e);
+
+    for (PathShape shape : {PathShape::Square, PathShape::Triangle}) {
+        SetpointPath p;
+        p.shape = shape;
+        p.radius_m = kMaxPathRadius;
+        p.accel_max = a_max;
+        p.period_s = minPeriod(p);          // the fastest the sliders offer
+        in.path = p;
+
+        SimState st = simStart(plate, in.design.home_leg_rad);
+        Eigen::Vector2d previous = Eigen::Vector2d::Zero();
+        double worst = 0.0;
+        const int frames = static_cast<int>(2.0 * p.period_s / in.dt);
+        for (int k = 0; k < frames; ++k) {
+            const SimReport f = stepSim(plate, in, st);
+            if (k > 0)
+                worst = std::max(worst,
+                                 (f.setpoint_velocity - previous).norm() / in.dt);
+            previous = f.setpoint_velocity;
+        }
+        // A frame straddling the join between a blend and a straight averages
+        // the two, so a 60 Hz difference can only ever UNDER-read the peak —
+        // it cannot manufacture one.  Measured 1.87 m/s^2 against the 1.888
+        // the plate can give.  The slack is for the arithmetic, not for a
+        // margin: 20% here would still be six times under the sharp corner.
+        ASSERT_TRUE(worst < 1.2 * a_max);
+    }
 }
 
 // Velocity feedforward, as the measurement that decided it.  The reference
@@ -172,8 +244,9 @@ void test_feedforward_is_worth_having() {
 }
 
 // The corner is the point of the cornered shapes.  A square is tracked worse
-// than a circle of the same size and lap time, and it has to be — the corner
-// is a step in the reference velocity, and a bandwidth-limited loop rounds it.
+// than a circle of the same size and lap time, and it has to be — a corner
+// turns much harder than a circle of the same period does, and a
+// bandwidth-limited loop rounds what it cannot turn into.
 void test_a_corner_is_harder_than_a_curve() {
     const auto models = getBuiltinModels();
     const auto& e = cascadeModel(models);
@@ -189,24 +262,35 @@ void test_a_corner_is_harder_than_a_curve() {
     const Track c = follow(e, K, circle, true, 20.0);
     const Track q = follow(e, K, square, true, 20.0);
     ASSERT_TRUE(!c.lost && !q.lost);
-    // The square's worst error is at its corners: measured 14.2 mm against the
-    // circle's 5.1 mm, on the same size and the same lap time.  Nearly three
-    // times, and it is the corner that does it.
+    // Measured: the square's worst error is 7.8 mm against the circle's 5.1 mm
+    // on the same size and the same lap time.  Half again, and it is the
+    // corner that does it.
+    //
+    // **This was 14.2 mm and nearly three times, before the corners were
+    // blended.**  The 3.7 mm fillet a 120 mm square at an eight-second lap
+    // takes is small enough that the shape still reads as a square and the
+    // corner is still visibly the hard part — the demo keeps its point — but
+    // half of what the ball used to lose there was the reference asking for a
+    // turn no tilt of this plate could produce.  See #31.
     //
     // The assertion is a RATIO rather than either number, because the square's
-    // figure is a peak sampled at 60 Hz right where the reference velocity
-    // steps: which frame falls nearest the corner decides it, and a phase
-    // perturbation at the last bit of a double swings it between 14.2 and 14.9
-    // mm.  The circle's 5.072 mm is stable to a thousandth over the same
-    // change.  Three times is the claim; a fourth significant figure on the
-    // square would be a claim about frame alignment.
-    ASSERT_TRUE(q.max_error > 2.0 * c.max_error);
+    // figure is a peak sampled at 60 Hz near the tightest part of the path.
+    // The blend makes it far less frame-sensitive than the step did — the old
+    // number swung between 14.2 and 14.9 mm on a phase perturbation of one bit
+    // — but it is still a peak, and a fourth significant figure on it would be
+    // a claim about frame alignment rather than about the corner.
+    ASSERT_TRUE(q.max_error > 1.3 * c.max_error);
+    // And the blend really did take the bulk of it: a sharp corner put the
+    // square nearly three times the circle, so anything at or above that is
+    // the fillet having been lost.
+    ASSERT_TRUE(q.max_error < 2.2 * c.max_error);
 }
 
 }  // namespace
 
 int main() {
     test_every_offered_setting_keeps_the_ball();
+    test_the_reference_never_asks_for_more_than_the_ball_can_do();
     test_feedforward_is_worth_having();
     test_a_corner_is_harder_than_a_curve();
     std::printf("test_trajectory: all passed\n");

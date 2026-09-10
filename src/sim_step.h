@@ -64,12 +64,22 @@ namespace caliburn {
 /// prevent for the gain.
 class SimPlate {
 public:
-    SimPlate(const TableParams& table, double gravity);
+    SimPlate(const TableParams& table, double gravity, double home_leg_rad);
 
     const TableKinematics& kinematics() const { return tk_; }
     const TableParams& params() const { return tk_.params(); }
     const RollingBallDynamics& rolling() const { return rolling_; }
     double gravity() const { return gravity_; }
+
+    /// The legs' resting angle, and so the heave the plate works about.
+    double homeLegRad() const { return home_leg_rad_; }
+
+    /// The most acceleration this plate can give the ball, in m/s^2.
+    ///
+    /// Measured once, in the constructor, because it costs a 36-direction tilt
+    /// sweep — 3.7 ms on the shipped geometry — and because it cannot change
+    /// without the plate changing.  A `SimPlate` IS its geometry.
+    double maxBallAccel() const { return max_ball_accel_; }
 
     /// The simulated ball's radius.  One ball — see `kPlateBall`.
     static constexpr double ballRadius() { return kPlateBall.radius; }
@@ -78,7 +88,39 @@ private:
     TableKinematics tk_;
     RollingBallDynamics rolling_;
     double gravity_;
+    double home_leg_rad_;
+    double max_ball_accel_;
 };
+
+/// The most acceleration a plate can give a ball, in m/s^2, and so the
+/// tightest turn a reference may ask the ball to make.
+///
+/// `(5/7) * g * sin(theta_max)`: a ball rolling on a plane tilted by
+/// `theta_max`, with the 5/7 a solid sphere's rotational inertia takes out of
+/// it.  A reference asking for more than this is asking for something no tilt
+/// of this plate can produce — infeasible by construction, which is the same
+/// principle `kMaxSetpointSpeed` and `kMinLapSeconds` already express and the
+/// reason the corner fillet is sized by it (#31).
+///
+/// **`theta_max` is derived, not chosen.**  It is the largest tilt whose
+/// velocity Jacobian stays under `kRatesUntrustworthyAbove` in every
+/// direction, swept — the threshold this repository has already argued for in
+/// `ball_contact.h` and shows in the plate panel as its "Poor" line, rather
+/// than a second opinion about when the mechanism is in trouble.  So `a_max`
+/// moves with the geometry: 1.52 m/s^2 at 120 mm legs, 1.89 at the shipped
+/// 150, 2.47 at 210.
+///
+/// The workspace maximum is deliberately NOT the answer, though on the shipped
+/// geometry the two coincide to a fifth of a degree — the workspace edge is
+/// precisely where the condition number blows up.  Taking it from the
+/// condition number is what keeps this a property of the plant that a leg
+/// slider moves, rather than a number someone has to re-measure by hand.
+///
+/// Measured on the shipped plate: `theta_max` = 15.63 degrees, `a_max` = 1.888
+/// m/s^2, which blends the 180 mm square's corners with a 33 mm radius at its
+/// fastest offered lap and a 0.4 mm one at its slowest.
+double maxBallAccel(const TableKinematics& tk, double gravity,
+                    double home_leg_rad);
 
 /// The plate a cascade parameter list describes.
 ///
@@ -147,6 +189,11 @@ struct SimInput {
     /// setpoint the loop has always had, and holds `held_setpoint` — the phase
     /// does not advance under one, so switching to a path resumes where it
     /// left off rather than wherever the clock had got to.
+    ///
+    /// `path.accel_max` is the exception: the step fills it in from the plate
+    /// and ignores whatever is here, because the corner blend is what the
+    /// PLANT can do rather than what the visitor asked for.  See
+    /// `SetpointPath::accel_max`.
     SetpointPath path{};
     Eigen::Vector2d held_setpoint{Eigen::Vector2d::Zero()};
 

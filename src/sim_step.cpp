@@ -3,13 +3,26 @@
 
 namespace caliburn {
 
-SimPlate::SimPlate(const TableParams& table, double gravity)
+double maxBallAccel(const TableKinematics& tk, double gravity,
+                    double home_leg_rad) {
+    // At the heave the legs rest at: the plate leans about its home height,
+    // and how far it can lean depends on that height — the same tilt that is
+    // reachable low down is off the end of a leg's travel up here.
+    const double theta_max = tk.max_conditioned_tilt(
+        tk.home_pose(home_leg_rad).z_c, kRatesUntrustworthyAbove);
+    return RollingBallDynamics::rolling_factor() * gravity * std::sin(theta_max);
+}
+
+SimPlate::SimPlate(const TableParams& table, double gravity, double home_leg_rad)
     : tk_(table),
       rolling_(kPlateBall, PlateParams{table.R_table, gravity}),
-      gravity_(gravity) {}
+      gravity_(gravity),
+      home_leg_rad_(home_leg_rad),
+      max_ball_accel_(caliburn::maxBallAccel(tk_, gravity, home_leg_rad)) {}
 
 SimPlate cascadePlate(const std::vector<PhysicalParam>& params) {
-    return SimPlate(cascadeMechanism(params), cascadeGravity(params));
+    return SimPlate(cascadeMechanism(params), cascadeGravity(params),
+                    cascadeHomeLegAngle(params));
 }
 
 AutoBalanceDesign cascadeDesign(const std::vector<PhysicalParam>& params) {
@@ -57,12 +70,22 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
     // one the visitor dragged, not the origin `pathPoint` returns for `Fixed`,
     // and its phase must not move — a lap the setpoint is not running is a lap
     // that should still be where it was left when a shape is chosen.
+    //
+    // The corner blend is taken from the PLATE rather than from `in`.  How
+    // tightly the setpoint may turn is the most acceleration this mechanism
+    // can give the ball, which is a fact about the plant and not about what
+    // the visitor asked for — so a harness cannot measure a reference the
+    // plate could never have followed, and cannot forget to ask for a feasible
+    // one.  See `maxBallAccel` and #31.
+    SetpointPath path = in.path;
+    path.accel_max = plate.maxBallAccel();
+
     PathStep path_step;
-    if (in.path.shape == PathShape::Fixed) {
+    if (path.shape == PathShape::Fixed) {
         path_step.point = in.held_setpoint;
         path_step.next_phase = s.path_phase;
     } else {
-        path_step = stepPath(in.path, s.path_phase, in.dt);
+        path_step = stepPath(path, s.path_phase, in.dt);
     }
     s.path_phase = path_step.next_phase;
     out.setpoint = path_step.point;

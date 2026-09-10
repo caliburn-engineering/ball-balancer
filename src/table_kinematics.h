@@ -205,6 +205,47 @@ public:
     double condition_number(const std::array<double, 3>& alpha,
                             const TablePose& pose) const;
 
+    /// The pose whose surface normal leans `tilt_rad` off vertical, towards
+    /// `azimuth_rad` measured from +x, at heave `z_c`.
+    ///
+    /// The pose convention is `R = Ry(theta) * Rx(phi)`, so the normal is
+    /// `[sin(theta) cos(phi), -sin(phi), cos(theta) cos(phi)]` — which means
+    /// neither `phi` nor `theta` is *the* tilt, and `sqrt(phi^2 + theta^2)` is
+    /// only the tilt to first order.  Anything asking "how far over can this
+    /// plate lean" wants the normal's angle from vertical and has to invert
+    /// that expression rather than approximate it.  Done here, once, exactly:
+    /// `phi` first, because `theta`'s half divides by `cos(phi)`.
+    static TablePose tilted_pose(double tilt_rad, double azimuth_rad, double z_c);
+
+    /// The furthest the plate can lean at heave `z_c` while the velocity
+    /// Jacobian's condition number stays under `condition_limit` — in EVERY
+    /// direction, because a bound that holds only where the mechanism happens
+    /// to be strong is not a bound on what the plate can be asked for.
+    ///
+    /// Swept rather than solved, and swept UPWARD from level rather than
+    /// bisected.  Above the reachable tilt the leg angles that come back are
+    /// clamped ones for a pose the mechanism does not have, and the condition
+    /// number computed there is arithmetic about a configuration that does not
+    /// exist: measured on the shipped geometry it falls back under 100 at 22
+    /// degrees having passed 19 500 at 20.  A bisection would find that and
+    /// believe it.  Marching from level and stopping at the first failure
+    /// cannot, because it never evaluates past the edge.
+    ///
+    /// A leg is required to have a real solution AND to be within its travel,
+    /// rather than `inverse_kinematics`'s clamp being accepted: a clamped leg
+    /// triple is a different pose from the one whose Jacobian is being asked
+    /// about.
+    ///
+    /// Measured on the shipped geometry at the home heave, with the limit at
+    /// `kRatesUntrustworthyAbove`: **15.63 degrees**, where the condition
+    /// number is 15.7 and the outermost leg is within 0.2 degrees of the end
+    /// of its travel.  The two arrive together, which is the same statement
+    /// as "the workspace edge is where the condition number blows up" — the
+    /// condition gate is what makes this a DERIVED number that moves with the
+    /// geometry rather than a workspace literal that has to be re-measured by
+    /// hand every time a leg length changes.
+    double max_conditioned_tilt(double z_c, double condition_limit) const;
+
     /// Determinant of the constraint Jacobian w.r.t. pose (J_pose)
     /// Zero = type-1 (forward) singularity — table has uncontrollable motion
     double det_J_pose(const std::array<double, 3>& alpha,

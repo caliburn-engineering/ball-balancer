@@ -898,20 +898,113 @@ K owns.  `test_auto_balance` pins both halves: that the reference velocity
 enters as a velocity error, and that raising those two weights raises the
 command a moving setpoint asks for.
 
-The corner survives that: a square is tracked to about 14 mm at its corners
-against a circle's 5.1 mm on the same size and lap — roughly three times.  That
-is a bandwidth limit made visible, and it is the point of offering cornered
-shapes at all.
+The corner survives that: a square is tracked to about 7.8 mm at its corners
+against a circle's 5.1 mm on the same size and lap — half again.  That is a
+bandwidth limit made visible, and it is the point of offering cornered shapes
+at all.
 
-**Three times is the claim; the square's own figure is not.**  It is a peak
-sampled at 60 Hz exactly where the reference velocity steps, so which frame
-lands nearest the corner decides it: a phase perturbation in the last bit of a
-double moves it between 14.2 and 14.9 mm, while the circle's 5.072 mm holds to
-a thousandth across the same change.  `test_trajectory` asserts the ratio for
-that reason, and a fourth significant figure on the square would be a claim
-about frame alignment rather than about the controller.
+**Half again is the claim; the square's own figure is not.**  It is a peak
+sampled at 60 Hz near the tightest part of the path, so which frame lands
+nearest the corner still moves it a little.  `test_trajectory` asserts the
+ratio for that reason, and a fourth significant figure on the square would be
+a claim about frame alignment rather than about the controller.  It was 14 mm
+and nearly three times before the corners were blended — see below.
 
 Decided in [#24](https://github.com/caliburn-engineering/caliburn/issues/24).
+
+### The corner is filleted, not a step
+
+**A sharp corner puts a step into the reference velocity, and that step is a
+modelling error rather than a demonstration.**  The polygons' corners are
+blended with a circular fillet of radius `v^2 / a_max`, so the reference is one
+the mechanism can actually track: the setpoint's own acceleration is `a_max`
+through the blend and zero along the straights, never infinite anywhere.
+
+This reverses half of what #24 wrote on `pathVelocity`, and the words are
+quoted in the header rather than quietly dropped:
+
+> Undefined for an instant at each corner, where the path's velocity is
+> genuinely discontinuous; the value returned there is the edge being left.
+> That is honest — a corner IS a step in the reference velocity, and it is the
+> reason the ball rounds one.
+
+The first sentence stands.  The second does not: the corner-rounding comes from
+the position error against closed-loop bandwidth, not from the velocity step,
+and the step's only other effect was to hand the actuator an impulse through
+K's velocity columns.  That was harmless while the ball was glued to the plate
+(#23) and stopped being harmless when it could be thrown off one.  Measured at
+60 Hz on the fastest square, the sharp reference asked for **21 m/s²** across
+one frame against the **1.89** the plate can give the ball.
+
+**A fillet, not a slew.**  Slewing `pathVelocity` without touching `pathPoint`
+would make the reference velocity stop being the reference position's
+derivative — a new lie in exactly the place one was being removed, and a direct
+violation of `stepPath`'s reason for returning both together.  A circular blend
+keeps `v = dp/dt` true by construction, and `test_setpoint_path` differences the
+position straight through each corner to say so.
+
+**`a_max = (5/7)·g·sin(theta_max)`, derived rather than chosen.**  `theta_max`
+is the largest tilt whose velocity-Jacobian condition number stays under
+`kRatesUntrustworthyAbove` in every direction, found by sweeping
+`condition_number` upward from level.  That reuses the threshold this repository
+has already argued for — the contact model's trust bound and the plate panel's
+own "Poor" line — instead of inventing a second opinion about when the mechanism
+is in trouble, and it makes `a_max` a property of the plant that a leg length
+moves: **1.52 m/s² at 120 mm legs, 1.888 at the shipped 150, 2.47 at 210**.  On
+the shipped geometry `theta_max` is **15.63°**.
+
+The workspace maximum is deliberately not the answer, though here the two
+coincide to a fifth of a degree — the workspace edge is precisely where the
+condition number blows up.  The sweep marches upward and stops at the first
+failure rather than bisecting, because past the reachable tilt the leg angles
+that come back are clamped ones for a pose the mechanism does not have: the
+condition number there falls back under 100 at 22° having passed 19 500 at 20°,
+and a bisection would find that and believe it.
+
+**The fillet is sized by speed, so it grows as the lap tightens.**  On the
+180 mm square it is 33 mm at the fastest lap the sliders offer and 0.6 mm at the
+slowest — #24's bandwidth argument made visible in the *target* instead of
+inferred from the ball's overshoot.  It is capped at the polygon's inradius,
+where the blends meet and the shape becomes its own incircle; nothing the
+sliders reach comes near that (33 mm against a 127 mm cap).
+
+Three things move with it, and all three had to:
+
+- **`pathOutline` draws the blend.**  A square drawn with sharp corners over a
+  setpoint that rounds them is a picture of a path the ball is not being sent
+  round, and the visitor would read the gap as the controller failing at the
+  corner rather than as the corner not being there.
+- **`pathLength` shrinks, and so does the lap floor.**  A blend gives up two
+  tangent lengths and gets back a shorter arc, so the 180 mm square's fastest
+  offered lap moves from 4.07 s to 3.85 s.  `minPeriod` cannot ask `pathLength`
+  for that — the length depends on the lap — so it solves the fixed point in
+  closed form at the speed cap, where the blend radius is known.
+- **`phaseNearest` considers the arcs.**  The nearest point on a blend is very
+  often in the middle of one, so a walk that only offered the straights would be
+  wrong by up to the blend radius.
+
+**A filleted polygon does not quite reach its `radius_m`**, since the blend cuts
+the corner off: 14 mm short for the 180 mm square at its floor, 33 mm for the
+triangle, whose sharper corner gives up its whole blend radius.  The size slider
+is still measured from the corner, because the corner is what the shape is.
+
+**`accel_max` is a property of the plant, and `stepSim` stamps it.**  The step
+overwrites whatever a caller left on `SimInput::path` with the plate's own
+`maxBallAccel()`, so no harness can measure a reference the plate could never
+have followed and none has to remember to ask — the same reasoning that puts the
+travel clamp in the plant rather than in the controller.  `accel_max = 0` is
+still reachable and is exactly the sharp reference this code drove before; it is
+kept because it is what the fillet is measured against, not because it is a
+setting anyone should ship.
+
+What it bought, over the 24 path settings the sliders offer: the worst mean
+tracking error fell from **36 mm to 21 mm**, the ball's widest reach from 195 mm
+to 192 mm, and the square's corner peak from 14 mm to 7.8 mm.  None of those is
+the point — the point is that the reference stopped demanding infinite
+acceleration — and all three are consequences of it.
+
+Decided in [#31](https://github.com/caliburn-engineering/caliburn/issues/31),
+from the decision record's D1–D5.
 
 > **The sliders are bounded, and there are two bounds because there are two
 > ways to ask for the impossible.**
