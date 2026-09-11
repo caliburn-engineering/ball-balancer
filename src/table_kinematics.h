@@ -37,6 +37,18 @@ struct FKResult {
     bool converged;
 };
 
+/// The velocity Jacobian's condition number above which this mechanism stops
+/// being believed.  The application's existing "Poor" line, reused rather than
+/// invented: a second threshold for the same thing would be a second opinion
+/// about when this mechanism is in trouble.
+///
+/// Three subsystems read it, which is why it lives beside the Jacobian rather
+/// than in any one of them: `plateMotion` stops vouching for its rates above
+/// it (#23), `maxBallAccel` sizes the corner fillet by the furthest tilt that
+/// stays under it (#31), and `legCommand` will not steer the plate past it at
+/// all (#29).
+inline constexpr double kRatesUntrustworthyAbove = 20.0;
+
 class TableKinematics {
 public:
     explicit TableKinematics(const TableParams& params);
@@ -204,6 +216,28 @@ public:
     /// 1 = isotropic (ideal), infinity = singular
     double condition_number(const std::array<double, 3>& alpha,
                             const TablePose& pose) const;
+
+    /// Can the mechanism be assembled here, AND believed here?
+    ///
+    /// `can_assemble` asks the weaker question — does a built assembly exist
+    /// at all — and existence is not enough to command a plate to.  Near a
+    /// direct-kinematics singularity two built assemblies approach each other,
+    /// meet, and swap; the velocity Jacobian degenerates between them, and a
+    /// pose marched through that meeting comes out on the OTHER assembly with
+    /// the plate mirrored about it.  The assembly floor cannot see it: both
+    /// modes stand well clear of the folded root, and measured at one triple
+    /// this plate reaches under the aggressive tuning they sit at 153 mm and
+    /// 75 mm of heave with residuals of 1e-12.  See #29.
+    ///
+    /// So the set a command may be steered into is this one rather than the
+    /// workspace: assemblable, and conditioned enough that the rates out of
+    /// the Jacobian are ones this repository already says it believes.
+    ///
+    /// Strictly under `condition_limit`, the same comparison
+    /// `max_conditioned_tilt` and `plateMotion` make, so that an infinite
+    /// condition number fails rather than passing by comparing false.
+    bool can_hold(const std::array<double, 3>& alpha,
+                  double condition_limit) const;
 
     /// The pose whose surface normal leans `tilt_rad` off vertical, towards
     /// `azimuth_rad` measured from +x, at heave `z_c`.

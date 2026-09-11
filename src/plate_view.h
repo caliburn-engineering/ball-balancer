@@ -156,7 +156,7 @@ private:
     std::string design_reason_ = "select LQR as the controller type";
     bool balance_engaged_ = false;
     bool balance_saturated_ = false;
-    bool balance_clipped_ = false;   ///< command had no assembly, was pulled back
+    bool balance_clipped_ = false;   ///< command was not holdable, pulled back
     float sp_x_mm_ = 0.0f;  // ball setpoint, plate frame
     float sp_y_mm_ = 0.0f;
 

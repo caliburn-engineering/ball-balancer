@@ -83,11 +83,12 @@ struct PlateMotion {
     Eigen::Vector3d normal() const { return R.col(2); }
 };
 
-/// The Jacobian condition number above which `plateMotion` stops vouching for
-/// its own rates.  The application's existing "Poor" line, reused rather than
-/// invented: a second threshold for the same thing would be a second opinion
-/// about when this mechanism is in trouble.
-inline constexpr double kRatesUntrustworthyAbove = 20.0;
+// `kRatesUntrustworthyAbove` — the condition number above which `plateMotion`
+// stops vouching for its own rates — moved to `table_kinematics.h` with #29.
+// It was never only the contact model's: `maxBallAccel` sizes the corner
+// fillet with it (#31) and `legCommand` bounds the plate's own travel with it,
+// and a threshold about the velocity Jacobian belongs beside the velocity
+// Jacobian.
 
 /// Assemble the plate's motion from where the legs are and how they are moving.
 ///

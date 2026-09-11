@@ -126,7 +126,7 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
         const LegCommand c = legCommand(tk, in.design, s.alpha_rad, seen, ref);
         cmd_rad = c.alpha_rad;
         out.saturated = c.saturated;
-        out.clipped = c.clipped_to_workspace;
+        out.clipped = c.clipped_to_holdable;
     }
     out.cmd_rad = cmd_rad;
 

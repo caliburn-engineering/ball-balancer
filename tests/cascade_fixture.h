@@ -29,6 +29,7 @@
 #include "test_helpers.h"
 
 #include <Eigen/Core>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -47,6 +48,37 @@ inline const ModelEntry& cascadeModel(const std::vector<ModelEntry>& models) {
         if (isCascadeModel(m)) return m;
     std::fprintf(stderr, "FAIL: no cascade model in the library\n");
     std::exit(1);
+}
+
+/// Is the plate still on the assembly the machine is built in?
+///
+/// `solve_pose` marches the pose forward from the last frame's; `can_assemble`
+/// and `can_hold` — which is what decided the command was legal — solve from
+/// the analytic level pose, which is on the built assembly by construction.
+/// While the two agree, the plate being simulated is the plate the loop was
+/// clipped against.  When they stop agreeing nothing else notices: both poses
+/// are real roots, both stand clear of the folded one, and their residuals are
+/// 1e-12 apiece.
+///
+/// Here rather than in either test file for the reason at the top of this one:
+/// `test_attract_mode` and `test_trajectory` both ask it, and a second
+/// transcription of a three-field pose comparison is how two suites come to
+/// disagree about what "the same plate" means.
+///
+/// The tolerance is 1e-6 in radians and metres, which is four orders of
+/// magnitude below anything the plate does in a frame and six above the
+/// solver's own noise — the two roots it separates are tens of degrees and
+/// tens of millimetres apart, so nothing here turns on it.
+///
+/// See [#29](https://github.com/caliburn-engineering/caliburn/issues/29).
+inline bool onBuiltAssembly(const TableKinematics& tk,
+                            const std::array<double, 3>& alpha_rad,
+                            const TablePose& pose) {
+    const FKResult level = tk.solve_pose(alpha_rad, tk.level_pose(alpha_rad));
+    if (!level.converged) return true;   // nothing to disagree with
+    return std::abs(level.pose.phi - pose.phi) < 1e-6 &&
+           std::abs(level.pose.theta - pose.theta) < 1e-6 &&
+           std::abs(level.pose.z_c - pose.z_c) < 1e-6;
 }
 
 /// The plate itself.  `legCommand` needs it because the servo travel limits

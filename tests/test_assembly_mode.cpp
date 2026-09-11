@@ -168,12 +168,100 @@ void test_the_servo_path_stays_inside_the_workspace() {
     ASSERT_TRUE(tk.can_assemble(from));
     ASSERT_TRUE(tk.can_assemble(to));
 
-    // Driven all the way there in steps, the plate always has a pose.
+    // Driven all the way there in steps, the plate always has a pose — and,
+    // since #29, always one whose Jacobian it is allowed to believe.
     std::array<double, 3> a = from;
     for (int k = 0; k < 600; ++k) {
         a = stepServosOnPlate(tk, a, to, 0.05, 1.0 / 60.0);
         ASSERT_TRUE(tk.can_assemble(a));
+        ASSERT_TRUE(tk.can_hold(a, kRatesUntrustworthyAbove));
     }
+}
+
+// The defect #29 turned out to be, pinned as a property of the mechanism.
+//
+// The folded root is not the only other assembly.  Approaching a
+// direct-kinematics singularity the built assembly the plate is in meets a
+// SECOND built one and the two swap, and `assembly_floor` cannot tell them
+// apart because neither is anywhere near the floor: at the triple below they
+// stand at 153 mm and 75 mm of heave against a floor of 8.5 mm — the nearer of
+// them nine times clear of it — and both satisfy the constraint equations to
+// better than 1e-9 (measured 1e-12 and 5e-16).
+//
+// This is the triple the aggressive tuning drove the plate to in #29, reached
+// by the old retreat, which asked only whether an assembly EXISTED.  It does —
+// two of them.
+void test_a_second_built_assembly_waits_past_the_singularity() {
+    const TableKinematics tk(cascadeTable());
+    const std::array<double, 3> a = {22.93 * kDeg, 22.93 * kDeg, 67.07 * kDeg};
+
+    const FKResult high = tk.solve_pose(a, tk.level_pose(a));
+    const FKResult low = tk.solve_pose(
+        a, TablePose{11.95 * kDeg, -6.89 * kDeg, 0.0755});
+
+    ASSERT_TRUE(high.converged);
+    ASSERT_TRUE(low.converged);
+    // Measured at 1e-12 and 5e-16; the bar is 1e-9, loose enough that the
+    // claim is "both are real roots" rather than a claim about the solver.
+    ASSERT_TRUE(tk.fk_residual(a, high.pose).norm() < 1e-9);
+    ASSERT_TRUE(tk.fk_residual(a, low.pose).norm() < 1e-9);
+
+    // Two distinct poses, and the plate is tilted the OTHER WAY on the second:
+    // the roll angles lean to opposite sides.  That is what the loop was
+    // fighting — it asked for a tilt and got its mirror.
+    ASSERT_TRUE(std::abs(high.pose.z_c - low.pose.z_c) > 0.05);
+    ASSERT_TRUE(high.pose.phi * low.pose.phi < 0.0);
+
+    // Neither is the folded root, so the guard that catches THAT sees nothing.
+    ASSERT_TRUE(high.pose.z_c > tk.assembly_floor(a));
+    ASSERT_TRUE(low.pose.z_c > tk.assembly_floor(a));
+
+    // What does see it is the conditioning: both sit far past the line this
+    // repository already draws at 20, which is why that line is what the
+    // retreat is bounded by.
+    ASSERT_TRUE(tk.condition_number(a, high.pose) > 100.0);
+    ASSERT_TRUE(tk.condition_number(a, low.pose) > kRatesUntrustworthyAbove);
+    ASSERT_TRUE(!tk.can_hold(a, kRatesUntrustworthyAbove));
+    ASSERT_TRUE(tk.can_assemble(a));     // and `can_assemble` still says yes
+}
+
+// So the retreat stops short of it.  The same command that used to land on
+// that triple now lands somewhere the plate can be believed, and the bound
+// that stops it is `kRatesUntrustworthyAbove` rather than a number chosen to
+// make this case go away.
+void test_the_retreat_stops_at_the_conditioned_boundary() {
+    const TableKinematics tk(cascadeTable());
+    const std::array<double, 3> level = all(45.0);
+    // Legs 1 and 2 at their floor and leg 3 at its ceiling: the hardest thing
+    // the servo box can ask this plate for, and what the aggressive tuning's
+    // command clamps to.
+    const std::array<double, 3> corner = {10.0 * kDeg, 10.0 * kDeg, 80.0 * kDeg};
+    const double span = 45.0 * kDeg - 10.0 * kDeg;
+
+    const Retreat r = retreatToHoldable(tk, corner, level,
+                                        kRatesUntrustworthyAbove);
+    ASSERT_TRUE(r.retreated);
+    ASSERT_TRUE(!r.safe_was_unholdable);
+    ASSERT_TRUE(tk.can_hold(r.alpha_rad, kRatesUntrustworthyAbove));
+
+    // It is a BOUND and not a refusal: the plate is still allowed nearly all of
+    // that ray.  Measured, the retreat gives up at 0.6124 of it where an
+    // unbounded one runs to 0.6307 — three per cent, and the singularity is
+    // in it.
+    const double scale = (45.0 * kDeg - r.alpha_rad[0]) / span;
+    ASSERT_TRUE(scale > 0.55);
+    ASSERT_TRUE(scale < 0.625);
+
+    // And the bound is live: ask for a tighter one and the retreat gives up
+    // sooner, ask for a looser one and it goes further.  A limit that moved
+    // nothing would be a limit that was not being consulted.
+    // Measured: 0.5210 at a limit of 10, 0.6272 at 40.
+    const double tight = (45.0 * kDeg -
+        retreatToHoldable(tk, corner, level, 10.0).alpha_rad[0]) / span;
+    const double loose = (45.0 * kDeg -
+        retreatToHoldable(tk, corner, level, 40.0).alpha_rad[0]) / span;
+    ASSERT_TRUE(tight < scale);
+    ASSERT_TRUE(loose > scale);
 }
 
 // And the retreat reports a broken precondition rather than freezing quietly.
@@ -184,15 +272,69 @@ void test_a_retreat_from_an_unassemblable_safe_end_says_so() {
     const std::array<double, 3> nowhere = {80.0 * kDeg, 10.0 * kDeg, 80.0 * kDeg};
     ASSERT_TRUE(!tk.can_assemble(nowhere));
 
-    const Retreat r = retreatToWorkspace(tk, nowhere, nowhere);
+    const Retreat r = retreatToHoldable(tk, nowhere, nowhere,
+                                        kRatesUntrustworthyAbove);
     ASSERT_TRUE(r.retreated);
-    ASSERT_TRUE(r.safe_was_unassemblable);
+    ASSERT_TRUE(r.safe_was_unholdable);
 
     // Where the precondition holds, the flag stays down.
-    const Retreat ok = retreatToWorkspace(tk, nowhere, all(45.0));
+    const Retreat ok = retreatToHoldable(tk, nowhere, all(45.0),
+                                         kRatesUntrustworthyAbove);
     ASSERT_TRUE(ok.retreated);
-    ASSERT_TRUE(!ok.safe_was_unassemblable);
-    ASSERT_TRUE(tk.can_assemble(ok.alpha_rad));
+    ASSERT_TRUE(!ok.safe_was_unholdable);
+    // What the retreat promises since #29 is holdable, which is the stronger
+    // of the two — asserted as the promise rather than as its consequence.
+    ASSERT_TRUE(tk.can_hold(ok.alpha_rad, kRatesUntrustworthyAbove));
+}
+
+// The home pose is the induction base case for both retreats: `legCommand`
+// retreats toward it, and the legs start there.  Its condition number is the
+// one number in that argument, so it is pinned rather than asserted in a
+// comment.  Measured 4.7 — a quarter of the line at which the plate stops
+// being believed, and inside the panel's own "Good" band.
+void test_the_home_pose_is_somewhere_the_plate_can_be_held() {
+    const TableKinematics tk(cascadeTable());
+    const std::array<double, 3> home = all(45.0);
+    const FKResult fk = tk.solve_pose(home, tk.level_pose(home));
+    ASSERT_TRUE(fk.converged);
+    ASSERT_NEAR(tk.condition_number(home, fk.pose), 4.7, 0.05);
+    ASSERT_TRUE(tk.can_hold(home, kRatesUntrustworthyAbove));
+}
+
+// The march's own property, and the reason it replaced a plain bisection.
+//
+// Holdability is a reachability set intersected with a condition sublevel set,
+// and the condition number rises toward a singularity and falls again past it
+// — so a ray out of the home pose can run good, bad, good.  A bisection can
+// converge into that third band and hand back a command the legs cannot travel
+// to, because the servo step is clipped at the band.  Measured over 4000 random
+// targets in the servo box, a plain bisection did exactly that on 1 of the 2147
+// retreats it performed: rare, and the kind of rare that is a bug rather than a
+// tolerance.
+//
+// The target below is that one.  Bisecting the whole ray lands on 0.9062 with
+// four of two hundred samples behind it unholdable; marching first lands on
+// 0.8837 with none.  So the claim is: whatever the retreat returns, every point
+// between `safe` and it is holdable too — sampled far more finely than the
+// march itself walks.
+void test_the_retreat_leaves_no_unholdable_gap_behind_it() {
+    const TableKinematics tk(cascadeTable());
+    const std::array<double, 3> level = all(45.0);
+    const std::array<double, 3> target = {13.7853 * kDeg, 35.0876 * kDeg,
+                                          22.8554 * kDeg};
+
+    const Retreat r = retreatToHoldable(tk, target, level,
+                                        kRatesUntrustworthyAbove);
+    ASSERT_TRUE(r.retreated);
+    ASSERT_TRUE(tk.can_hold(r.alpha_rad, kRatesUntrustworthyAbove));
+
+    for (int i = 0; i <= 400; ++i) {
+        const double s = i / 400.0;
+        std::array<double, 3> a{};
+        for (int leg = 0; leg < 3; ++leg)
+            a[leg] = level[leg] + s * (r.alpha_rad[leg] - level[leg]);
+        ASSERT_TRUE(tk.can_hold(a, kRatesUntrustworthyAbove));
+    }
 }
 
 }  // namespace
@@ -205,7 +347,11 @@ int main() {
     test_a_folded_pose_does_not_persist_across_frames();
     test_an_unreachable_triple_fails_rather_than_folding();
     test_the_servo_path_stays_inside_the_workspace();
+    test_a_second_built_assembly_waits_past_the_singularity();
+    test_the_retreat_stops_at_the_conditioned_boundary();
     test_a_retreat_from_an_unassemblable_safe_end_says_so();
+    test_the_home_pose_is_somewhere_the_plate_can_be_held();
+    test_the_retreat_leaves_no_unholdable_gap_behind_it();
     std::printf("test_assembly_mode: all passed\n");
     return 0;
 }

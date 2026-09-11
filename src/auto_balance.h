@@ -70,11 +70,18 @@ struct LegCommand {
     std::array<double, 3> alpha_rad;
     bool saturated;  ///< at least one leg hit its travel limit
 
-    /// The command asked for a pose the mechanism cannot assemble, and was
+    /// The command asked for a pose the plate cannot be held at, and was
     /// scaled back until it could.  Distinct from `saturated`: a triple can be
     /// inside every servo's travel and still not exist, because the travel
-    /// limits are a box and the workspace is not.
-    bool clipped_to_workspace;
+    /// limits are a box and the workspace is not — and a triple can exist and
+    /// still not be somewhere to steer to, because a second assembly waits on
+    /// the far side of a singularity (#29).
+    ///
+    /// **`clipped_to_holdable`, not `clipped_to_workspace`**, which is what
+    /// this was called until #29, for the same reason `retreatToHoldable` is
+    /// not `retreatToWorkspace`: the workspace is the set that assembles, and
+    /// the clip is against a smaller one.
+    bool clipped_to_holdable;
 };
 
 /// What the loop is asked to make the ball do: be somewhere, and be moving.
@@ -123,16 +130,27 @@ struct BallReference {
 /// command has no pose, so it freezes at whatever tilt it last held and rolls
 /// the ball off.  That was the second half of issue #22.
 ///
-/// The command is scaled back toward the home pose until it is assemblable,
-/// which gives up magnitude and keeps direction — what saturation ought to do.
-/// The level pose always assembles, so the search always has an answer.
+/// The command is scaled back toward the home pose until the plate can be HELD
+/// there, which gives up magnitude and keeps direction — what saturation ought
+/// to do.  Held rather than merely assembled: a triple just past a singularity
+/// has an assembly and it is the WRONG one, mirrored about the crossing, and a
+/// plate steered onto it tilts away from the ball while the loop asks for the
+/// opposite.  See `retreatToHoldable` and #29.  The level pose always
+/// assembles and sits at a condition number of 4.7, so the search always has an
+/// answer.
 LegCommand legCommand(const TableKinematics& tk,
                       const AutoBalanceDesign& d,
                       const std::array<double, 3>& alpha_rad,
                       const Eigen::Vector4d& ball,
                       const BallReference& ref);
 
-/// Pull `target` back toward `safe` until the mechanism can be assembled there.
+/// Pull `target` back toward `safe` until the plate can be held there.
+///
+/// **`retreatToHoldable`, not `retreatToWorkspace`**, which is what this was
+/// called until #29.  The workspace is the set of triples that assemble, and
+/// retreating into it is not enough — the last three per cent of it, against a
+/// singularity, is where the plate comes back mirrored.  The old name would
+/// now be describing the wrong set.
 ///
 /// The servo travel limits are a box and the workspace is not — barely half
 /// the box has an assembly at all, and it is under no obligation to be convex.
@@ -141,32 +159,52 @@ LegCommand legCommand(const TableKinematics& tk,
 /// last held, and a frozen tilted plate rolls the ball off.  That was issue
 /// #22's second half.
 ///
-/// `safe` must itself be assemblable, and every caller has one to hand: the
-/// home pose for a command, the legs' present position for a step.  The legs
-/// start at home and are never moved anywhere unassemblable, so that second
-/// one holds by induction.
+/// **Existence is not the whole bound, and #29 is what the rest of it costs.**
+/// A triple can have a perfectly good assembly and still be somewhere no plate
+/// should be steered: approaching a direct-kinematics singularity, the built
+/// assembly the plate is in meets a second one and they swap, so a pose
+/// marched through the meeting comes out mirrored — tilting away from the ball
+/// while the loop asks for the opposite.  Measured under the aggressive tuning,
+/// the plate crossed a Jacobian condition number of 290 and spent the rest of
+/// the run tilted downhill toward a ball it was trying to catch.  So the set
+/// retreated into is `can_hold`'s rather than `can_assemble`'s, bounded by
+/// `condition_limit`.
+///
+/// `safe` must itself be holdable, and every caller has one to hand: the home
+/// pose for a command, the legs' present position for a step.  The legs start
+/// at home — condition number 4.7 on the shipped plate — and are never moved
+/// anywhere unholdable, so that second one holds by induction.
 ///
 /// Scaling gives up magnitude and keeps direction, which is what saturation
-/// ought to do.  Bisection, but the answer does not depend on the workspace
-/// being convex along the ray: the returned point is one that was actually
-/// tested, never an interpolated boundary.
+/// ought to do.
+///
+/// **March, then bisect inside the bracket**, the same shape
+/// `max_conditioned_tilt` uses.  Halving the whole ray would assume the
+/// holdable points are one unbroken run from `safe`, and they are not — the
+/// condition number rises toward a singularity and falls again past it, so a
+/// ray can run good, bad, good, and a bisection that lands in the third band
+/// returns a command the legs cannot travel to.  What comes back is a point
+/// that was actually tested AND that the march reached by an unbroken run,
+/// never an interpolated boundary.
 struct Retreat {
     std::array<double, 3> alpha_rad;
-    bool retreated;  ///< the target had no assembly and was pulled back
+    bool retreated;  ///< the target could not be held and was pulled back
 
-    /// `safe` did not assemble either, so there was nothing to retreat TO and
+    /// `safe` could not be held either, so there was nothing to retreat TO and
     /// `alpha_rad` is just `safe` handed back.  The precondition is broken and
     /// the plate is about to freeze; this is the flag that says so rather than
     /// letting it look like an ordinary clip.  It cannot happen through the
-    /// two call sites here — the level pose always assembles, and the legs are
-    /// never moved anywhere that does not — but "cannot happen" is worth one
-    /// bool when the alternative is a silent stall.
-    bool safe_was_unassemblable;
+    /// two call sites here — the level pose always assembles and is far from
+    /// any singularity, and the legs are never moved anywhere that is not —
+    /// but "cannot happen" is worth one bool when the alternative is a silent
+    /// stall.
+    bool safe_was_unholdable;
 };
 
-Retreat retreatToWorkspace(const TableKinematics& tk,
-                           const std::array<double, 3>& target,
-                           const std::array<double, 3>& safe);
+Retreat retreatToHoldable(const TableKinematics& tk,
+                          const std::array<double, 3>& target,
+                          const std::array<double, 3>& safe,
+                          double condition_limit);
 
 /// Where the ball will be when it comes back down, in the plate's frame.
 ///

@@ -391,6 +391,14 @@ Sweep sweepOneDirection(const ModelEntry& e, const Eigen::MatrixXd& K,
         // The plate always has an assembly now.  A stronger statement than
         // "the ball stayed on", and the one #22's fix actually makes.
         ASSERT_TRUE(frame.fk.converged);
+        // And it is always the SAME assembly — the one the machine is built
+        // in, which is the one `can_hold` vouched for when the command was
+        // clipped.  #29 is a whole ticket about what happens when those two
+        // part company: the plate came out of a near-singular frame on the
+        // other assembly, tilted downhill toward the ball it was trying to
+        // catch, and rolled it off.  Asked here rather than in one test,
+        // because every sweep in this file is a chance for it.
+        ASSERT_TRUE(onBuiltAssembly(plate.kinematics(), st.alpha_rad, st.pose));
         ASSERT_TRUE(!frame.left_plate);
 
         if (frame.airborne) sw.separated = true;
@@ -421,8 +429,11 @@ void test_the_kick_is_rejected_from_every_direction() {
     // Visible, and nowhere near the edge: 30 mm against the 280 mm the plate
     // has.  Measured; the assertion is loose around it on purpose.
     ASSERT_TRUE(worst_peak > 0.018);
-    // 30.7 mm measured over these 720 directions, against the 280 mm the plate
-    // has.  This bound was raised to 90 mm when the ball first learned to hop,
+    // 31.2 mm measured over these 720 directions, against the 280 mm the plate
+    // has — 30.7 before #29 bounded the plate's own travel by the conditioning
+    // of its Jacobian, which costs the loop a little authority at full tilt and
+    // so lets the ball run half a millimetre further out.
+    // This bound was raised to 90 mm when the ball first learned to hop,
     // on the reasoning that a hopping ball carries its speed without rolling
     // friction and so lands further out — true in general, and no longer what
     // happens here: the shipped tuning does not separate the ball at this
@@ -477,10 +488,14 @@ void test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance() {
         margin = std::min(margin, sw.min_normal);
     }
     ASSERT_EQ(separated, 0);
-    // And with room to spare rather than by a whisker: 1.62 measured.  The bar
-    // is 1.0, which still fails if the plate ever comes within a tenth of a g
-    // of letting go at the disturbance the demo hands out.  Asserted only
-    // because `separated` is zero — see `Sweep::min_normal`.
+    // And with room to spare rather than by a whisker: 1.91 measured, a fifth
+    // of a g.  The bar is 1.0, which still fails if the plate ever comes within
+    // a tenth of a g of letting go at the disturbance the demo hands out.
+    // Asserted only because `separated` is zero — see `Sweep::min_normal`.
+    //
+    // It was 1.62 before #29.  A plate that may not steer itself past a
+    // Jacobian condition number of 20 also may not slam quite as hard, and
+    // the margin the ball is held by is what that buys.
     ASSERT_TRUE(margin > 1.0);
 }
 
@@ -517,6 +532,31 @@ void test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance() {
 // it fails at 0.40 and 0.45 and is clean again at 0.50.  The bound is set below
 // the first failure of any tuning, with margin, exactly as `kMaxSetpointSpeed`
 // is.
+//
+// **RE-MEASURED AFTER #29, AND EVERY FAILURE IN THAT TABLE IS GONE.**  On the
+// same 36 x 24 grid, with the plate no longer able to steer itself past a
+// Jacobian condition number of 20:
+//
+//     speed   Nominal   Aggressive   Detuned      (failures out of 864)
+//     0.25       0           0          0
+//     0.30       0           0          0
+//     0.35       0           0          0
+//     0.40       0           0          0
+//     0.45       0           0          0
+//     0.50       0           0          0
+//
+// So every one of those losses was the plate changing assembly mode through a
+// singularity rather than the gain running out of authority — the same defect,
+// on the same grid, that #29's own sweep was failing on.  Both tables are kept
+// because the OLD one is what chose `kMaxNudgeSpeed`, and a bound whose reason
+// has moved is worth noticing rather than quietly adjusting.
+//
+// **The bound is deliberately left at 0.30.**  What this measurement retires is
+// the evidence FOR 0.30, not the case for having a bound: the envelope beyond
+// 0.50 is unmeasured, `kMaxSetpointSpeed` is in the same position after #31
+// (see its header and D16), and raising a limit is a product decision rather
+// than a consequence of a green table.  Whoever raises it owns re-measuring
+// what it protects.
 struct Tracked {
     bool lost = false;
     double end_error = 0.0;   ///< [m] ball to setpoint, twenty seconds later
@@ -606,17 +646,17 @@ void test_the_nudge_buttons_cannot_compose_past_the_bound() {
 // the loop body is the whole test.  180 directions, not the handful a schedule
 // would reach: a preset that fails in one direction is a preset that fails.
 //
-// > **This is currently failing, and it is not #30's to fix.**
-// > Direction 33 of 180 — 66.0 degrees — rolls the ball to 293.7 mm against a
-// > rim at 280 mm and loses it.  Not a hop: `separated` is false the whole way,
-// > so the aggressive gain simply flings it wider than the plate.  The same
-// > disease under the harness's old servo-rate instant showed up at a different
-// > grid point instead (the shipped tuning, 1 of 720 directions, at 162.5
-// > degrees), which is what `test_attract_mode` was already failing on before
-// > this change; the last tree where every direction held was `3303ff4`, one
-// > commit before the plate's accelerations became analytic.  So this is #23's
-// > to answer — either the analytic normal force needs a further look, or the
-// > Aggressive preset's `Q` of 150 no longer clears the bar it was chosen for.
+// > **This was #29, and neither of the two answers it expected was right.**
+// > It failed in direction 33 of 180 — 66.0 degrees — rolling the ball to
+// > 293.7 mm against a rim at 280 mm.  The suspects were the analytic normal
+// > force (#23) and `Q = 150` itself (#19), and it was neither: the plate came
+// > out of a frame at Jacobian condition number 290 **on the other assembly**,
+// > 13.8 degrees over with its downhill pointing at the ball, and spent the
+// > next half second accelerating the ball it was trying to catch.  The loop
+// > was asking for the right tilt the whole way and being handed its mirror.
+// > `retreatToHoldable` is now bounded by `can_hold` rather than
+// > `can_assemble`, the worst condition number this sweep reaches is 11.1, and
+// > every direction holds.  See #29 and `onBuiltAssembly`.
 void test_the_aggressive_preset_recovers_from_every_direction() {
     const auto models = getBuiltinModels();
     const auto& e = cascadeModel(models);
@@ -628,29 +668,42 @@ void test_the_aggressive_preset_recovers_from_every_direction() {
 }
 
 // And the fact that only exists now the ball can leave: an over-aggressive
-// tuning does not merely overshoot, it takes the ball OFF THE SURFACE and then
-// off the plate.  Q at 2000 slams the legs hard enough that the plate is
-// moving out from under the ball rather than tilting under it.
+// tuning does not merely overshoot, it takes the ball OFF THE SURFACE.  Q at
+// 2000 slams the legs hard enough that the plate is moving out from under the
+// ball rather than tilting under it.
 //
 // Measured against the application's own step, at the demo's own 0.26 m/s
-// disturbance and over 90 directions: the ball leaves the surface in 4 of them
-// and leaves the plate entirely in 1.  Before #23 the same tuning looked
-// merely fast — 0.35 s to settle — because a ball glued to the plate cannot be
-// thrown off it.
+// disturbance: the ball leaves the surface in 1 of 90 directions and rises
+// 2.1 mm — and in 16 of 720, which is the sweep that says one is a real sliver
+// rather than a grid artefact.  Before #23 the same tuning looked merely fast
+// — 0.35 s to settle — because a ball glued to the plate cannot be thrown off
+// it.
+//
+// **"And then off the plate" did not survive #29, and was never the gain's
+// doing.**  This test used to assert a loss as well, and got one: the ball left
+// the plate in 1 direction of 90.  That loss was the plate changing assembly
+// mode through a singularity and tilting the ball away — the same defect, under
+// a different gain, that the aggressive preset's sweep above was failing on.
+// With the plate bounded to poses whose Jacobian it is allowed to believe, Q at
+// 2000 keeps the ball at every direction of this disturbance.  That is asserted
+// rather than dropped: it is the guard's own claim, and an absurd gain is where
+// it is worth making.
 //
 // **The size of the hop is nothing like what this test used to claim.**  It
-// said "one launch reached 689 mm of altitude"; the ball now rises 1.5 mm.
-// Both of the reasons are in
+// said "one launch reached 689 mm of altitude"; the ball now rises 2.1 mm.  Two
+// of the reasons are in
 // `test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance` above —
 // a differenced acceleration answering a stepping command with a delta
 // function (#23), and a harness taking the servo rate at the wrong instant
 // (#30).  A metre of altitude off a 0.26 m/s nudge was never physics.
 //
-// What survives, and is the point of the test, is that losing the ball is a
-// thing an over-aggressive gain does and a sensible one does not.  That is
-// still the honest ceiling on #19's aggressive preset, and still a far better
-// demonstration of over-aggressive control than a settling time.
-void test_an_over_aggressive_tuning_throws_the_ball_off() {
+// What survives, and is the point of the test, is that letting go of the ball
+// at all is a thing an over-aggressive gain does and a sensible one does not:
+// the three tunings the UI offers separate it in none of 720 directions at
+// this same disturbance.  That is still the honest ceiling on #19's aggressive
+// preset, and still a far better demonstration of over-aggressive control than
+// a settling time.
+void test_an_over_aggressive_tuning_takes_the_ball_off_the_surface() {
     const auto models = getBuiltinModels();
     const auto& e = cascadeModel(models);
 
@@ -667,28 +720,38 @@ void test_an_over_aggressive_tuning_throws_the_ball_off() {
     const double dt = in.dt;
     const int settle = static_cast<int>(s.settle_s / dt);
 
-    int lost = 0;
-    bool separated = false;
+    int lost = 0, separated = 0;
     double peak_hop = 0.0;
     for (int i = 0; i < 90; ++i) {
         const double theta = i * M_PI / 45.0;
         SimState st = simStart(plate, in.design.home_leg_rad,
                                Eigen::Vector4d(s.start_x, s.start_y, 0.0, 0.0));
 
+        bool airborne_here = false;
         for (int k = 0; k < settle + static_cast<int>(6.0 / dt); ++k) {
             if (k == settle && !st.ball.airborne) {
                 st.ball.rolling(2) += s.speed * std::cos(theta);
                 st.ball.rolling(3) += s.speed * std::sin(theta);
             }
             const SimReport frame = stepSim(plate, in, st);
-            if (frame.airborne) separated = true;
+            // Four times the aggressive preset is where the plate is most
+            // likely to be steered somewhere it should not be, so it is the
+            // best place to ask: it is still the assembly the machine is built
+            // in.  See #29 and `onBuiltAssembly`.
+            ASSERT_TRUE(onBuiltAssembly(plate.kinematics(), st.alpha_rad, st.pose));
+            if (frame.airborne) airborne_here = true;
             peak_hop = std::max(peak_hop, frame.ball_plate(2) - kBallRadius);
             if (frame.left_plate) { ++lost; break; }
         }
+        if (airborne_here) ++separated;
     }
-    ASSERT_TRUE(lost > 0);            // it really does lose the ball
-    ASSERT_TRUE(separated);           // and really does take it off the surface
-    // Millimetres, not metres: 1.5 mm measured over these 90 directions.  Both
+    // It really does take the ball off the surface.  One direction of these 90,
+    // which is thin — the 720-direction sweep finds 16 and is what says the
+    // sliver is real; this test stays at 90 because it runs on every build.
+    ASSERT_TRUE(separated >= 1);
+    // And does not lose it, at the disturbance the demo's own buttons offer.
+    ASSERT_EQ(lost, 0);
+    // Millimetres, not metres: 2.1 mm measured over these 90 directions.  Both
     // bounds are assertions — too small and the plate has stopped letting go at
     // all, too large and something is differencing a step again.
     ASSERT_TRUE(peak_hop > 0.0005);
@@ -708,7 +771,7 @@ int main() {
     test_a_shove_while_tracking_is_rejected_from_every_direction();
     test_the_nudge_buttons_cannot_compose_past_the_bound();
     test_the_aggressive_preset_recovers_from_every_direction();
-    test_an_over_aggressive_tuning_throws_the_ball_off();
+    test_an_over_aggressive_tuning_takes_the_ball_off_the_surface();
     test_ten_minutes_unattended_never_loses_the_ball();
     std::printf("test_attract_mode: all passed\n");
     return 0;

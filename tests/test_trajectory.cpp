@@ -31,6 +31,11 @@ struct Track {
     double mean_error = 0.0;   ///< [m] after the first lap
     double max_error = 0.0;
     bool lost = false;
+
+    /// The plate came off the assembly the machine is built in at some point
+    /// in the run.  #29 is the ticket about what that costs; the test for it
+    /// is `onBuiltAssembly`, in `cascade_fixture.h`.
+    bool changed_assembly = false;
 };
 
 /// `stepSim` — the step the application drives, with the setpoint driven by a
@@ -99,6 +104,8 @@ Track follow(const ModelEntry& e, const Eigen::MatrixXd& K,
 
         r.max_radius = std::max(r.max_radius,
                                 std::hypot(frame.ball_plate(0), frame.ball_plate(1)));
+        if (!onBuiltAssembly(plate.kinematics(), s.alpha_rad, s.pose))
+            r.changed_assembly = true;
         if (t > path.period_s) {          // after one lap, so the start is not counted
             const double err = std::hypot(frame.ball_plate(0) - sp(0),
                                           frame.ball_plate(1) - sp(1));
@@ -118,6 +125,14 @@ Track follow(const ModelEntry& e, const Eigen::MatrixXd& K,
 // The acceptance criterion, over the whole envelope the sliders offer: every
 // shape, the size range end to end, and at each size the fastest lap the UI
 // will allow as well as the slowest.
+//
+// **Twenty-four of twenty-four, counted and asserted, under Nominal.**  The
+// contract #29 closes on is that Nominal must hold every setting the sliders
+// offer while Aggressive is allowed to lose the ball, so the count is the
+// claim and it is made here rather than reported: a sweep that quietly drops
+// a setting — a shape added, a radius list edited — would otherwise still
+// pass.  `kSettings` is the arithmetic of the three loops below and fails if
+// they and it disagree.
 void test_every_offered_setting_keeps_the_ball() {
     const auto models = getBuiltinModels();
     const auto& e = cascadeModel(models);
@@ -130,6 +145,7 @@ void test_every_offered_setting_keeps_the_ball() {
     const double a_max = cascadePlate(e.params).maxBallAccel();
 
     double worst_radius = 0.0, worst_error = 0.0;
+    int kept = 0;
     for (PathShape s : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
         for (double r_mm : {20.0, 60.0, 120.0, kMaxPathRadius * 1000.0}) {
             SetpointPath p;
@@ -141,10 +157,14 @@ void test_every_offered_setting_keeps_the_ball() {
                 p.period_s = T;
                 const Track t = follow(e, K, p, true, 2.0 * T + 4.0);
                 ASSERT_TRUE(!t.lost);
+                // And on the plate the loop was clipped against, not one that
+                // swapped assembly under it somewhere in the lap.  See #29.
+                ASSERT_TRUE(!t.changed_assembly);
                 // And not merely on the plate — comfortably on it.  The ball
                 // swings wide of a corner, and that overshoot is what the
                 // radius cap exists to leave room for.
                 ASSERT_TRUE(t.max_radius < 0.8 * rim);
+                ++kept;
                 worst_radius = std::max(worst_radius, t.max_radius);
                 worst_error = std::max(worst_error, t.mean_error);
             }
@@ -162,6 +182,10 @@ void test_every_offered_setting_keeps_the_ball() {
     // being thrown wide of one.
     ASSERT_TRUE(worst_radius < 0.24);
     ASSERT_TRUE(worst_error < 0.03);
+    // 3 shapes x 4 sizes x 2 laps.  Written out rather than counted from the
+    // loops, so that an edit to either has to be an edit to both.
+    constexpr int kSettings = 3 * 4 * 2;
+    ASSERT_EQ(kept, kSettings);
 }
 
 // What the corner actually hands the actuator, which is the whole of #31.

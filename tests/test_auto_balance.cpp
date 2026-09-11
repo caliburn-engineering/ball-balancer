@@ -244,7 +244,7 @@ void test_command_clamps_to_servo_travel_then_to_the_workspace() {
     const LegCommand c = legCommand(cascadeKinematics(), d, alpha,
                                     Eigen::Vector4d(0.05, 0, 0, 0), {});
     ASSERT_TRUE(c.saturated);
-    ASSERT_TRUE(c.clipped_to_workspace);
+    ASSERT_TRUE(c.clipped_to_holdable);
 
     // Both stops asked for a 70 degree spread, which no assembly of this
     // mechanism has.  What comes back is inside the travel rather than on it.
@@ -282,7 +282,7 @@ void test_a_reachable_clamp_is_left_on_the_stop() {
     const LegCommand c = legCommand(cascadeKinematics(), d, alpha,
                                     Eigen::Vector4d(0.05, 0, 0, 0), {});
     ASSERT_TRUE(c.saturated);
-    ASSERT_TRUE(!c.clipped_to_workspace);
+    ASSERT_TRUE(!c.clipped_to_holdable);
     ASSERT_NEAR(c.alpha_rad[0], d.alpha_min_rad, 1e-12);
     ASSERT_NEAR(c.alpha_rad[1], kHome, 1e-12);
     ASSERT_NEAR(c.alpha_rad[2], kHome, 1e-12);

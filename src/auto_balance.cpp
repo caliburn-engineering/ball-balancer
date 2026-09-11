@@ -53,31 +53,58 @@ std::array<double, 3> lerp(const std::array<double, 3>& from,
 
 }  // namespace
 
-Retreat retreatToWorkspace(const TableKinematics& tk,
-                           const std::array<double, 3>& target,
-                           const std::array<double, 3>& safe) {
-    if (tk.can_assemble(target)) return {target, false, false};
+Retreat retreatToHoldable(const TableKinematics& tk,
+                          const std::array<double, 3>& target,
+                          const std::array<double, 3>& safe,
+                          double condition_limit) {
+    if (tk.can_hold(target, condition_limit)) return {target, false, false};
+    // `safe` itself cannot be held: there is nothing to retreat TO.  Say so
+    // rather than returning it as though it were a normal clip.
+    if (!tk.can_hold(safe, condition_limit)) return {safe, true, true};
 
-    // Twelve bisections, because the whole servo travel is 70 degrees and
-    // 70 / 2^12 is a hundredth of a degree — below what the plate's own 0.1
-    // degree readout can show, and far below what a frame of servo lag moves.
-    // Each one costs a forward solve, but only on frames that are already
-    // saturated hard enough to be asking for a pose that does not exist.
+    // **March, then bisect inside the bracket** — the shape `max_conditioned_tilt`
+    // already uses, and for the same reason.  A bisection over the whole ray
+    // assumes the holdable points are one unbroken run from `safe`, and they
+    // are not: holdability is a reachability set intersected with a condition
+    // sublevel set, and the condition number rises toward a singularity and
+    // falls again past it.  So a ray can run good, bad, good — measured over
+    // 3000 random targets, 2 of the 1623 retreats bisection performed returned
+    // a scale on the far side of an unholdable band, which is a command the
+    // legs cannot travel to because the servo step is clipped at the band.
     //
-    // `lo` is only ever set to a scale that was TESTED assemblable, so what
-    // comes back is valid whether or not the workspace is convex along this
-    // ray.  `lo = 0` is `safe`, which the contract says already is.
-    double lo = 0.0, hi = 1.0;
-    for (int i = 0; i < 12; ++i) {
-        const double mid = 0.5 * (lo + hi);
-        if (tk.can_assemble(lerp(safe, target, mid))) lo = mid;
-        else hi = mid;
+    // The step is half a degree of the widest leg coordinate, so it costs what
+    // the ray is long: one or two solves for a servo step, which is a fraction
+    // of a degree and is what runs every frame, and up to seventy for a command
+    // pinned to the far corner of the servo box, which is a frame that is
+    // already saturated.  Half a degree is `max_conditioned_tilt`'s resolution
+    // and is five times finer than the narrowest band that measurement found.
+    constexpr double kMarchStep = 0.5 * M_PI / 180.0;
+    constexpr int kRefinements = 12;   // 0.5 deg / 2^12, well past useful
+
+    double span = 0.0;
+    for (int i = 0; i < 3; ++i)
+        span = std::max(span, std::abs(target[i] - safe[i]));
+    const int steps = std::max(1, static_cast<int>(std::ceil(span / kMarchStep)));
+
+    // `bad` starts at 1: `target` is already known unholdable, so the bracket
+    // exists however far the march gets.
+    double good = 0.0, bad = 1.0;
+    for (int i = 1; i < steps; ++i) {
+        const double s = static_cast<double>(i) / steps;
+        if (tk.can_hold(lerp(safe, target, s), condition_limit)) good = s;
+        else { bad = s; break; }
     }
-    // `lo` never moved: every scale tested failed, which can only mean `safe`
-    // itself has no assembly.  Say so rather than returning it as though it
-    // were a normal clip.
-    if (lo == 0.0 && !tk.can_assemble(safe)) return {safe, true, true};
-    return {lerp(safe, target, lo), true, false};
+
+    // Only now, inside a bracket the march has proved straddles an edge, is
+    // halving safe.  `good` is only ever a scale that was TESTED holdable and
+    // that the march reached by an unbroken run, so what comes back is both a
+    // pose the plate can hold and one it can be driven to.
+    for (int i = 0; i < kRefinements; ++i) {
+        const double mid = 0.5 * (good + bad);
+        if (tk.can_hold(lerp(safe, target, mid), condition_limit)) good = mid;
+        else bad = mid;
+    }
+    return {lerp(safe, target, good), true, false};
 }
 
 LegCommand legCommand(const TableKinematics& tk,
@@ -108,13 +135,16 @@ LegCommand legCommand(const TableKinematics& tk,
         out.alpha_rad[i] = clamped;
     }
 
-    // The travel limits are a box; the workspace is not.  The level pose is
-    // the safe end here — always assemblable, whatever the gain asked for.
+    // The travel limits are a box; the workspace is not, and the workspace's
+    // own edge is not the bound either.  The level pose is the safe end here —
+    // always assemblable AND far from any singularity, whatever the gain asked
+    // for.
     const std::array<double, 3> level = {d.home_leg_rad, d.home_leg_rad,
                                          d.home_leg_rad};
-    const Retreat r = retreatToWorkspace(tk, out.alpha_rad, level);
+    const Retreat r = retreatToHoldable(tk, out.alpha_rad, level,
+                                        kRatesUntrustworthyAbove);
     out.alpha_rad = r.alpha_rad;
-    out.clipped_to_workspace = r.retreated;
+    out.clipped_to_holdable = r.retreated;
     return out;
 }
 
@@ -153,9 +183,9 @@ std::array<double, 3> stepServosOnPlate(const TableKinematics& tk,
                                         double tau,
                                         double dt) {
     // Where the legs ARE is the safe end: they started at home and have never
-    // been moved anywhere without an assembly, so it holds by induction.
-    return retreatToWorkspace(tk, stepServos(alpha_rad, cmd_rad, tau, dt),
-                              alpha_rad).alpha_rad;
+    // been moved anywhere the plate cannot be held, so it holds by induction.
+    return retreatToHoldable(tk, stepServos(alpha_rad, cmd_rad, tau, dt),
+                             alpha_rad, kRatesUntrustworthyAbove).alpha_rad;
 }
 
 namespace {

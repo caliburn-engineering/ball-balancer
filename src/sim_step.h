@@ -277,7 +277,8 @@ struct SimReport {
 ///      application did not.
 ///   3. **Then the servos move**, clipped at the workspace boundary and not
 ///      merely at each leg's travel: the servo limits are a box and the
-///      workspace is not.
+///      workspace is not — and clipped short of its singular fringe too, since
+///      a second assembly waits on the far side of one (#29).
 ///   4. **Then the pose**, seeded from the last one and adopted only on
 ///      success — a leg triple with no assembly leaves the plate where it was,
 ///      which is what a mechanism does when it binds.

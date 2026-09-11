@@ -405,9 +405,11 @@ three steps per time constant, and the tau slider goes lower still.
 
 ### Assembly mode
 
-Which of the two solutions of the 3-RRS constraint equations a pose is.  The
-mechanism is **built upward** — table above its knees — and there is a second,
-**folded** root with the table lying flat on the base.  For this plate the
+Which solution of the 3-RRS constraint equations a pose is.  The mechanism is
+**built upward** — table above its knees — and the other roots are the ones
+this section is about.  There are more than two, and they are not alike: the
+**folded** root is #22's, and #29 found that the built assembly itself has a
+neighbour it can be swapped for.  For this plate the
 folded one is not an approximation or a numerical artefact: `R_ground ==
 R_table` with `L1 == L2` makes `(phi, theta, z_c) = (0, 0, 0)` satisfy every
 leg's length constraint exactly, at every servo angle.  It is a single pose,
@@ -441,6 +443,68 @@ Decided in [#22](https://github.com/caliburn-engineering/caliburn/issues/22).
 > that was already there and did not work: a tighter tolerance, or a retry
 > keyed on convergence.
 
+**The folded root is not the only one, and the floor cannot see the others.**
+Approaching a direct-kinematics singularity the built assembly meets a
+*second built* assembly, they exchange, and a pose marched through the meeting
+comes out on the other one with the plate leaning the opposite way.  At the
+triple #29's aggressive sweep drove the plate to, the two sit at **153 mm and
+75 mm** of heave with roll angles of −20.4° and +12.0°, both satisfying the
+constraint equations to better than 1e-9, and the nearer of the two standing
+nine times clear of the 8.5 mm floor.  Nothing in #22's guard is looking at this: it separates the built
+population from a single point at the origin, and neither of these is near it.
+
+What tells them apart is the **conditioning**, which is what makes the same
+threshold this repository already trusts the right bound — see *Workspace vs.
+servo box*.  Away from the meeting the two assemblies are far apart and the
+Jacobian is healthy; at it they coincide and it degenerates.  Measured, the
+plate crossed a condition number of **290** in one frame and came out mirrored.
+
+Decided in [#29](https://github.com/caliburn-engineering/caliburn/issues/29).
+
+> **Not "the plate flipped" and not "the solver diverged".**
+> Both assemblies are poses this mechanism genuinely has, reached continuously;
+> what a real plate cannot do is *pass between* them, because at the crossing
+> it gains an instantaneous freedom nothing is holding. Describing it as a
+> flip suggests a discontinuity to detect, and describing it as divergence
+> suggests a solver to tighten. The fix is neither: it is not steering the
+> plate there.
+
+> **OPEN, and found while closing #29: a big enough leg step can jump the
+> solve onto a third root, with no singularity involved at all.**
+> `solve_pose` warm-starts from the previous frame's pose, and Newton returns
+> whichever root its seed is nearest.  `can_hold` asks about the **level-seeded**
+> root, so once the two part company the command is being cleared against a
+> plate the simulation is not running.
+>
+> Measured at `Q = 2000` — four times the aggressive preset — under a 0.60 m/s
+> shove, in 3 of 180 directions.  In the clearest of them one frame moves a leg
+> **10.6 degrees** and the marched pose lands at a roll of −14.8 degrees and a
+> heave of 146.0 mm, where the level-seeded root sits at +1.0 degrees and
+> 194.9 mm.  Both roots are well conditioned there (5.5 and 6.1), both clear the
+> floor, and the residual is 2e-17.  This is not a mechanism passing through a
+> singularity, it is a solver being seeded badly, and neither #22's guard nor
+> #29's can see it.
+>
+> **No tuning the UI offers reaches it.**  Swept at 180 directions, Nominal and
+> Aggressive change assembly in no direction at any speed up to 1.50 m/s — five
+> times the largest disturbance the interface can compose — and both keep the
+> ball everywhere below 1.20 m/s, where they lose it in all 180 directions to
+> the gain running out rather than to a jump.  At `Q = 2000` the count runs 0 at
+> 0.43 m/s, 3 at 0.60, 18 at 0.80, 21 at 1.00 and 0 again at 1.50.
+>
+> **#32's rate limit would not close this**, which is worth saying because it
+> looks as though it would.  A 10.5 rad/s servo caps a 60 Hz frame at 10.0
+> degrees of leg travel, and one of the three jumps above happens on a step of
+> **8.79 degrees**.  Capping the input is not the same as the solve being right.
+>
+> The fix is not a threshold either.  `can_hold` already defines the command set
+> by the level-seeded root, so the honest rule is that `solve_pose` must return
+> the assembly `can_hold` vouched for, and the warm start is an optimisation
+> that has to agree with it — a change to the forward solve's contract.
+>
+> Filed as
+> [#35](https://github.com/caliburn-engineering/caliburn/issues/35).
+
 ### Workspace vs. servo box
 
 The three servo travel limits form a **box**; the set of leg triples the plate
@@ -465,16 +529,42 @@ through the knee plane on some frame is a yes-or-no event, and everything
 downstream of a yes was already broken.  Travel limits and kick magnitude
 changed *which* trajectories crossed, not how much authority the loop had.
 
-With the assembly pinned, the response is monotonic in the disturbance the way
-it should always have been: at 360 swept directions the shipped tuning loses
+With the assembly pinned, the response became monotonic in the disturbance the
+way it should always have been: at 360 swept directions the shipped tuning lost
 none at 0.35 m/s, 2 at 0.42, 14 at 0.50 and 259 at 0.60.  A curve, not a
 scatter — and one that says something true about the plant.
 
-`retreatToWorkspace` is the one answer, used at both seams: pull the target back
-toward a triple known to be assemblable until it is too.  Giving up magnitude
-and keeping direction is what saturation ought to do, and the returned point is
-always one that was actually tested, so the workspace does not have to be convex
-for it to be right.
+**Re-measured after #29 the curve has moved a long way out, and it is a curve
+again.**  On the same grid the shipped tuning now loses none at 0.35, 0.42, 0.50
+or 0.60, none at 0.90, and all 180 at 1.20 and 1.50.  Monotonic, with the edge
+somewhere between 0.90 and 1.20 m/s — four times the largest disturbance the
+interface can compose, against the 0.42 where losses used to start.  What moved
+it is that the plate is no longer allowed to steer itself into a
+near-singularity, which is where the authority was going.
+
+`retreatToHoldable` is the one answer, used at both seams: pull the target back
+toward a triple known to be good until it is too.  (It was `retreatToWorkspace`
+until #29, which is the name for the set it used to retreat into — see below.)
+Giving up magnitude and keeping direction is what saturation ought to do.
+
+**It marches before it bisects**, the same shape `max_conditioned_tilt` uses and
+for the same reason.  Halving the whole ray assumes the good points are one
+unbroken run from the safe end, and they are not: the set is a reachability set
+intersected with a condition sublevel set, and the condition number rises toward
+a singularity and falls again past it, so a ray can run good, bad, good.  A
+plain bisection can converge into that third band and return a command the legs
+cannot travel to, because the servo step is clipped at the band — measured over
+4000 random targets in the servo box, on 1 of the 2147 retreats they provoked.
+Marching half a degree of the widest leg coordinate first, then halving inside
+the bracket, makes the returned point one that was tested *and* reachable by an
+unbroken run.
+
+It costs what the ray is long, which is the right way round: one or two solves
+for a servo step, which is a fraction of a degree and is what runs every frame,
+and up to seventy for a command pinned to the far corner of the servo box, which
+is a frame that is already saturated.  Measured end to end over 72 aggressive
+kick sweeps, `stepSim` costs **20.7 µs on average and 618 µs at its worst**,
+against a 16.7 ms frame.
 
 Both seams are needed, which is the part worth remembering.  `legCommand` clips
 the command against the level pose; `stepServosOnPlate` clips the *step*
@@ -483,25 +573,116 @@ straight line the first-order lag travels along, and that line can leave the
 workspace even when both of its ends are inside it.  Two kick directions in
 every 360 were exactly that: one frame, mid-flight, with no assembly.
 
-The clip is not a rare corner.  Under the shipped tuning a single attract kick
-saturates the legs from every direction tested and is workspace-clipped from
-177 of 180 of them; under a deliberately aggressive tuning, from all 180.  It
-runs on essentially every disturbed frame.
+The clip is not a rare corner.  A single 0.26 m/s kick saturates the legs and
+clips the command in **all 180** directions tested, under the shipped tuning and
+the aggressive one alike.  It runs on essentially every disturbed frame.  (It
+was 177 of 180 for the shipped tuning before #29 tightened the bound; the three
+that used to squeak through now do not.)
 
 Decided in [#22](https://github.com/caliburn-engineering/caliburn/issues/22).
+
+**"Assemblable" is not the bound; "holdable" is, and #29 is what the
+difference cost.**  A triple can have a perfectly good assembly and still be
+somewhere no plate should be steered, because a second built assembly is
+waiting on the far side of a singularity (see *Assembly mode*).  Driven there,
+the plate came back **mirrored**: 13.8° over with its downhill pointing at the
+ball, while the loop went on asking for the opposite tilt and the ball
+accelerated to 1.04 m/s and off the rim.  Not a hop — the ball was rolling the
+whole way — and not the gain's fault either, which is why #29 spent its first
+half looking for one.
+
+**Neither of the two flags that were watching says anything about it, and that
+is the finding rather than an aside.**  #29 asked which of three things binds.
+
+- **`clipped_to_holdable` fires, and discriminates nothing.**  A 0.26 m/s kick
+  clips the command in all 5760 swept directions under every tuning the UI
+  offers, at every speed from 0.26 to 0.35 m/s.  A flag that is true on every
+  disturbed frame cannot be the difference between the frames that lose the
+  ball and the frames that do not.
+- **`rates_trustworthy` fires too, and cannot act.**  It went false on the
+  frame the plate crossed condition 290 and stayed false for three frames, and
+  again from 0.25 s after the kick — it saw the whole event.  But it is a flag
+  on `PlateMotion` that only the *contact* test reads, and all it can do is
+  decline to decide a separation on rates it does not believe.  The loop never
+  consults it, the command is not bounded by it, and the ball here was never
+  airborne: it rolled off a plate tilted the wrong way.  Watching is not the
+  same as binding.
+- **Plain workspace geometry binds** — specifically the geometry `can_assemble`
+  was never asked about.
+
+That is why the guard goes on the command rather than on either flag, and why
+the threshold is the one `rates_trustworthy` already uses: the quantity was
+always the right one, it was simply being reported instead of respected.
+
+So the set the retreat works in is `can_hold`'s rather than `can_assemble`'s:
+assemblable, **and** with a velocity-Jacobian condition number at or under
+`kRatesUntrustworthyAbove`.  That number is not new and was not chosen here.
+It is the contact model's trust bound (#23), the tilt limit the corner fillet
+is sized by (#31), and the line the plate panel already paints red and calls
+"Poor" — one opinion about when this mechanism is in trouble, now enforced
+rather than only reported.
+
+**The margin it takes back is tiny, which is the point rather than an
+objection.**  On the ray from level to the servo box's hardest corner —
+`(10, 10, 80)` degrees, which is what an over-driven command clamps to — the
+retreat now gives up at a scale of **0.6124** where an unbounded one runs to
+0.6307.  Three per cent of one ray, and the singularity is in it.  The bound is
+live in both directions: at a limit of 10 the retreat stops at 0.5210, at 15 at
+0.5922, at 40 at 0.6272.
+
+What it costs, and what it bought:
+
+| over 720 kick directions at 0.26 m/s | before | after |
+|---|---|---|
+| Nominal — balls lost | 0 | 0 |
+| Nominal — worst condition number | 12.3 | 11.3 |
+| Aggressive — balls lost | **1** | **0** |
+| Aggressive — worst condition number | **290.5** | 11.1 |
+| normal-force margin, 72 directions | 1.62 m/s² | 1.91 |
+
+Over the 24 path settings the sliders offer, Nominal keeps all 24 either way;
+its worst condition number falls from 21.3 to 16.6 and the ball's widest reach
+from 193.0 mm to 192.9.  The plate is a little less willing at full tilt and
+the ball runs half a millimetre further out of a kick — 30.7 mm to 31.2 — which
+is the whole of the price.
+
+Decided in [#29](https://github.com/caliburn-engineering/caliburn/issues/29).
 
 > **The plate has less authority than the linear design believes.**
 > The cascade model knows about servo travel and nothing about the workspace,
 > so the gain will ask for tilts the mechanism cannot make, and against a
 > disturbance large enough it will lose the ball rather than recover it.
 >
-> There is no clean ceiling: the slivers of direction where it cannot come
-> back get narrower as the disturbance shrinks rather than stopping at a
-> threshold.  At 5760 swept directions, 0.29 m/s of ball velocity loses six,
-> 0.28 loses two, and 0.26 loses none.  Attract mode's kick sits at 0.26 for
-> that reason, and nobody has proved there is not a narrower sliver still.
-> Designing a gain that respects the workspace is not done, and is the thing
-> that would replace this argument with a guarantee.
+> There was no clean ceiling: the slivers of direction where it could not come
+> back got narrower as the disturbance shrank rather than stopping at a
+> threshold.  At 5760 swept directions, 0.29 m/s of ball velocity lost six,
+> 0.28 lost two, and 0.26 lost none.  Attract mode's kick sits at 0.26 for that
+> reason.
+>
+> **#29 removed every one of those slivers, and they were not what this
+> paragraph thought they were.**  Re-measured on the same 5760-direction grid,
+> the shipped tuning loses none at 0.26, 0.28, 0.29, 0.30 or 0.35, and the
+> aggressive one loses none either — the slivers were the plate changing
+> assembly mode through a singularity, not the gain running out of authority.
+> The first sentence's *argument* still stands: the cascade model knows about
+> servo travel and nothing about the workspace, and the plate is clipped in all
+> 5760 of those directions at every one of those speeds.  What has gone is the
+> evidence that the clipping was losing the ball.  The edge is now between 0.90
+> and 1.20 m/s, and it is a threshold rather than a sliver: at 1.20 every one of
+> 180 directions loses the ball.
+>
+> Designing a gain that respects the workspace is still not done, and is still
+> the thing that would replace this argument with a guarantee.
+
+> **"Assemblable" and "holdable" are two words because they are two sets.**
+> *Assemblable* (`can_assemble`) is the workspace: a built assembly exists.
+> *Holdable* (`can_hold`) is the workspace without its singular fringe: an
+> assembly exists AND the velocity Jacobian there is one this repository says
+> it believes. Every holdable triple is assemblable and the reverse is false,
+> and the gap between them is small — three per cent of the hardest ray — which
+> is exactly why using the wrong one cost a release blocker rather than being
+> obvious. Commands and servo steps are bounded by the second; the first is
+> still the right question to ask about whether a pose exists at all.
 
 ### Attract mode
 
@@ -697,7 +878,9 @@ says so), so the artefact fired on **every corner of every lap**.
 So separation is real, and it is *rarer than any figure this section has ever
 carried*.  Under the shipped tuning at a 0.26 m/s disturbance the ball separates
 in **0 of 720 directions**, and not by a hair: the worst frame of the whole
-sweep still has **1.62 m/s² of normal force in hand**, a sixth of a g.  The
+sweep still has **1.91 m/s² of normal force in hand**, a fifth of a g — 1.62
+before #29 stopped the plate steering itself into a near-singularity, since a
+plate that may not slam as hard does not press the ball as lightly either.  The
 figures this paragraph used to give were 30-in-72 with the differenced
 estimator, then 2-in-720 once the accelerations went analytic.  Both were
 measured by harnesses that took the servo rate at the frame's *start* while
@@ -713,10 +896,11 @@ longer credited with accelerations its servos never produced.
 **Distinguish the tuning from the demo here, since they parted company.**  The
 shipped *tuning* can still hop, above about 0.30 m/s, in narrow slivers of
 direction and by fractions of a millimetre — measured but **not pinned**: where
-the tuning starts to let go is a sweep over speed as well as direction, and that
-is [#31](https://github.com/caliburn-engineering/caliburn/issues/31)'s, one of
-the harnesses *One sim loop* exists to be written against.  What is pinned is
-the disturbance the interface actually hands out, above.  The shipped *demo*
+the tuning starts to let go is a sweep over speed as well as direction, and no
+ticket has yet owned it.  (#31 was named here as its owner and did not take it;
+#29 moved the whole envelope again and is the reason a fresh measurement is
+worth more than this sentence.)  What is pinned is the disturbance the interface
+actually hands out, above.  The shipped *demo*
 does not hop at all, because it no longer kicks the ball: tracing a gentle
 circle never separates it, and
 `test_ten_minutes_unattended_never_loses_the_ball` asserts exactly that — zero
@@ -753,8 +937,8 @@ is the dead band's derivation, from `asin(c_rr)` to `atan(c_rr)`; see below.
 
 Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
 
-> **This landed with three suites red; one assertion is still red, and #30 is
-> what told them apart.**
+> **This landed with three suites red; all three are green now, and it took
+> two more tickets to say why.**
 > `test_auto_balance`, `test_trajectory` and `test_attract_mode` all failed on
 > the tree that made the accelerations analytic, and the ticket was explicit
 > that this was on purpose: the fix is independently sound — validated against a
@@ -769,19 +953,22 @@ Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
 > 40-per-cent-fast plate that pushed it onto the stops.  `test_trajectory` keeps
 > the ball at every setting the sliders offer again, for the same reason.
 >
-> **One is real, and it is #29's.**
-> `test_the_aggressive_preset_recovers_from_every_direction` loses the ball in
-> direction 33 of 180 — 66.0° — rolling it to 293.7 mm against a rim at 280 mm.
-> No hop is involved: the ball is purely rolling and the aggressive gain simply
-> flings it wider than the plate.  Under the harnesses' old servo-rate instant
-> the same disease surfaced at a different grid point instead — the *shipped*
-> tuning, 1 direction in 720, at 162.5° — which is what `test_attract_mode` was
-> failing on before #30.  The last tree where every direction held is `3303ff4`,
-> one commit before the accelerations went analytic.  So the question for
-> [#29](https://github.com/caliburn-engineering/caliburn/issues/29) is a narrow
-> one now: either the analytic normal force needs a further look, or #19's
-> Aggressive `Q = 150` no longer clears the bar it was chosen for.  It remains a
-> release blocker.
+> **One was real, and it was neither of the two things it looked like.**
+> `test_the_aggressive_preset_recovers_from_every_direction` lost the ball in
+> direction 33 of 180 — 66.0° — rolling it to 293.7 mm against a rim at 280 mm,
+> with no hop involved at all.  The question left for
+> [#29](https://github.com/caliburn-engineering/caliburn/issues/29) was put as a
+> choice between two suspects: the analytic normal force needing a further look,
+> or #19's Aggressive `Q = 150` no longer clearing the bar it was chosen for.
+>
+> It was **neither**.  The plate crossed a Jacobian condition number of 290 and
+> came out of it on a *different assembly*, mirrored — tilting the ball away
+> while the loop asked for the opposite tilt.  The normal force is sound and
+> `Q = 150` is fine; what was wrong was that nothing stopped the command
+> steering the plate through a singularity.  See *Workspace vs. servo box* and
+> *Assembly mode*.  Bounding the retreat by the conditioning took it to 0 of
+> 720 directions under every tuning the UI offers, and the release blocker with
+> it.
 
 > **A separation is a claim about the plate's velocity, so it is only as good
 > as that velocity.**
@@ -795,20 +982,25 @@ Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
 > own readout turns red and says "Poor".  This is #22's lesson again: do not
 > act on a solve you cannot validate.
 
-> **An over-aggressive tuning does not merely overshoot — it throws the ball
-> off the plate.**
-> Q on ball position at 2000 takes the ball off the surface in 64 of 720 kick
-> directions and off the plate entirely in 5 of them.  Before this the same
-> tuning looked merely fast, because a glued ball cannot be thrown.  That is the
-> honest ceiling on #19's aggressive preset.
+> **An over-aggressive tuning does not merely overshoot — it takes the ball off
+> the surface.**
+> Q on ball position at 2000 separates the ball in **17 of 720** kick
+> directions, rising 3.5 mm.  Before the ball could leave the plate at all the
+> same tuning looked merely fast, because a glued ball cannot be thrown.  That
+> is the honest ceiling on #19's aggressive preset, and the three tunings the UI
+> offers separate it in none of those 720.
 >
-> **Re-measured against the application's own step**, which is the correction
-> the previous note here was waiting for.  The figures it carried — 54 of 720,
-> "launches reaching 689 mm" — were the differenced estimator seen through a
-> harness running the plate 40 per cent fast.  The *altitude* was the part that
-> was overstated, and by three orders of magnitude: the peak hop is **6.4 mm**.
-> The shape of the result survives; a metre of altitude off a 0.26 m/s nudge
-> never was physics.
+> **Re-measured twice, and the claim has lost a half each time.**  The figures
+> this note first carried — 54 of 720, "launches reaching 689 mm" — were the
+> differenced estimator seen through a harness running the plate 40 per cent
+> fast.  Correcting both (#23, #30) left 64 of 720 off the surface, 5 of them
+> off the plate, and a 6.4 mm peak.  Then #29 bounded the plate's own travel by
+> the conditioning of its Jacobian and the **"and off the plate" half went
+> away**: at this disturbance Q = 2000 now keeps the ball in every direction.
+> It was never the gain throwing it off — it was the plate changing assembly
+> mode underneath it, the same defect the aggressive preset's sweep was failing
+> on. What survives is the part that was always about the gain: it lets go of
+> the ball, and a sensible tuning does not.
 
 ### Trajectory tracking
 

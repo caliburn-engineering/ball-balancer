@@ -561,9 +561,18 @@ void PlateView::drawControls() {
 
     // --- Jacobian ---
     ImGui::SeparatorText("Jacobian Analysis");
+    // "Poor" is `kRatesUntrustworthyAbove` rather than a literal 20, because
+    // this readout is where that number came from: the contact model's trust
+    // bound, the corner fillet's tilt limit and the leg command's own travel
+    // bound are all the same line, and a second opinion about when this
+    // mechanism is in trouble is exactly what they exist not to be.
+    //
+    // Under the closed loop it should never go red — since #29 the command is
+    // pulled back at that line — so red here means the legs are being driven
+    // by hand.
     auto cond_col = [](double c) -> ImVec4 {
         if (c < 10) return {0.3f, 1.0f, 0.3f, 1.0f};
-        if (c < 20) return {1.0f, 0.8f, 0.2f, 1.0f};
+        if (c < kRatesUntrustworthyAbove) return {1.0f, 0.8f, 0.2f, 1.0f};
         return {1.0f, 0.3f, 0.3f, 1.0f};
     };
     ImGui::TextColored(cond_col(condition_num_),
@@ -573,7 +582,8 @@ void PlateView::drawControls() {
     const float cond_frac = std::min(static_cast<float>(condition_num_ / 50.0), 1.0f);
     ImGui::ProgressBar(cond_frac, ImVec2(-1, 0),
                        condition_num_ < 10 ? "Good" :
-                       condition_num_ < 20 ? "Degraded" : "Poor");
+                       condition_num_ < kRatesUntrustworthyAbove ? "Degraded"
+                                                                 : "Poor");
 
     // --- Display ---
     ImGui::SeparatorText("Display");
@@ -741,14 +751,20 @@ void PlateView::drawBalanceControls() {
     if (balance_clipped_) {
         // A different thing from saturation: the legs are inside their travel
         // and the controller is still not getting what it asked for, because
-        // the pose it wants is not one this mechanism has.
+        // the pose it wants is not one this mechanism can be held at.
         statusBadge("clipped", kBadgeWarn,
                     "The command was pulled back toward the home pose until "
-                    "the mechanism could actually assemble it.\n\n"
+                    "the mechanism could actually hold it.\n\n"
                     "Distinct from saturation: every leg is inside its travel "
-                    "limits, and the pose they were asked for still does not "
-                    "exist. The servo limits are a box; the workspace is not, "
-                    "and barely half the box has an assembly at all.\n\n"
+                    "limits, and the pose they were asked for is still not one "
+                    "the plate can be steered to. The servo limits are a box; "
+                    "the workspace is not, and barely half the box has an "
+                    "assembly at all.\n\n"
+                    "An assembly is not quite enough either. Near a "
+                    "singularity a second assembly waits on the other side, "
+                    "and a plate driven through the meeting comes out mirrored "
+                    "- so the command stops at the Condition # this panel "
+                    "already calls \"Poor\".\n\n"
                     "See CONTEXT.md, \"Workspace vs. servo box\".");
     }
 

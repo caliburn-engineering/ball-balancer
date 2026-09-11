@@ -359,6 +359,22 @@ bool TableKinematics::can_assemble(const std::array<double, 3>& alpha) const {
     return solve_pose(alpha, level_pose(alpha)).converged;
 }
 
+bool TableKinematics::can_hold(const std::array<double, 3>& alpha,
+                               double condition_limit) const {
+    // The level seed again, and for a second reason here: the question is
+    // about the assembly the machine is built in, and asking it from wherever
+    // a pose happens to have wandered is how the two modes come to be
+    // confused in the first place.
+    const FKResult fk = solve_pose(alpha, level_pose(alpha));
+    if (!fk.converged) return false;
+    // Written as a `<`, and negated the way `max_conditioned_tilt` writes it,
+    // so that a non-finite condition number — which is what a singular
+    // Jacobian returns — fails rather than passing by comparing false.  One
+    // spelling of one line: the two places that ask this question of this
+    // plate must not answer it differently.
+    return !!(condition_number(alpha, fk.pose) < condition_limit);
+}
+
 double TableKinematics::assembly_floor(const std::array<double, 3>& alpha) const {
     const double mean_knee_z = params_.L1 *
         (std::sin(alpha[0]) + std::sin(alpha[1]) + std::sin(alpha[2])) / 3.0;
