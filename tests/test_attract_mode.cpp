@@ -551,12 +551,15 @@ void test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance() {
 // because the OLD one is what chose `kMaxNudgeSpeed`, and a bound whose reason
 // has moved is worth noticing rather than quietly adjusting.
 //
-// **The bound is deliberately left at 0.30.**  What this measurement retires is
-// the evidence FOR 0.30, not the case for having a bound: the envelope beyond
-// 0.50 is unmeasured, `kMaxSetpointSpeed` is in the same position after #31
-// (see its header and D16), and raising a limit is a product decision rather
-// than a consequence of a green table.  Whoever raises it owns re-measuring
-// what it protects.
+// **The bound is deliberately left at 0.30, and it is owned rather than
+// orphaned.**  What this measurement retires is the evidence FOR 0.30, not the
+// case for having a bound: the envelope beyond 0.50 is unmeasured, and raising
+// a limit is a product decision rather than a consequence of a green table.
+// `kMaxSetpointSpeed` is in exactly this position after #31, and both belong to
+// the same sweep — the decision record's D16, which the ticket closing #23
+// owns.  Re-measuring either against today's contact model would be wasted
+// anyway: #23's round two makes landing bounce, and restitution moves the
+// separation behaviour this envelope is made of.
 struct Tracked {
     bool lost = false;
     double end_error = 0.0;   ///< [m] ball to setpoint, twenty seconds later

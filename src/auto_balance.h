@@ -304,6 +304,20 @@ Eigen::VectorXd defaultLqrInputWeights(int m);
 /// The slivers thin as the shove shrinks rather than stopping at a threshold —
 /// the same shape as `kMaxSetpointSpeed`'s bound, and the same reason for
 /// leaving margin rather than sitting on the first clean measurement.
+///
+/// **The measurement above is stale and the bound is left standing anyway.**
+/// Since #29 the plate may not steer itself past a Jacobian condition number of
+/// 20, and every failure in that table is gone: re-measured on the same 36 x 24
+/// grid, all three tunings are clean at 0.35, 0.40, 0.45 and 0.50.  "Nominal
+/// loses the ball at 0.35" is no longer true.
+///
+/// So what #29 retired is the evidence FOR 0.30, not the case for a bound.  The
+/// envelope past 0.50 is unmeasured, and raising a limit is a product decision
+/// rather than a consequence of a green table.  `kMaxSetpointSpeed` is in
+/// exactly this position after #31, and both belong to the same re-measurement:
+/// see the decision record's D16 and the ticket that closes #23, which owns it.
+/// The number is left where it is rather than quietly adjusted, because a bound
+/// whose stated reason has moved is worth noticing.
 constexpr double kMaxNudgeSpeed = 0.30;
 
 /// What one Nudge button may add along its own axis.

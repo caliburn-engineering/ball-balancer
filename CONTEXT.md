@@ -364,6 +364,23 @@ ceiling fails a test rather than quietly invalidating this paragraph.
 > shape as `kMaxSetpointSpeed`'s bound and the same reason for leaving margin.
 > A demo whose controls include a setting that breaks it is not offering a
 > choice, it is offering a trap.
+>
+> **Every failure in that table is gone since #29, and the bound stays at 0.30
+> anyway.**  Re-measured on the same 36 x 24 grid with the plate bounded to
+> poses it can be believed at, all three tunings are clean at 0.35, 0.40, 0.45
+> and 0.50 — so "Nominal starts losing the ball at 0.35" has stopped being true,
+> and the slivers were the plate changing assembly mode rather than the gain
+> running out.  What that retires is the evidence FOR 0.30, not the case for a
+> bound: the envelope past 0.50 is unmeasured, and raising a limit is a product
+> decision rather than a consequence of a green table.
+>
+> **It is owned rather than orphaned.**  `kMaxSetpointSpeed` is in exactly this
+> position after #31, and both belong to one sweep — the decision record's D16,
+> which the ticket closing #23 owns.  Re-measuring either against today's
+> contact model would be wasted work in any case: #23's round two makes landing
+> bounce, and restitution moves the separation behaviour this envelope is made
+> of.  The numbers are left standing rather than quietly adjusted, because a
+> bound whose stated reason has moved is worth noticing.
 
 Detuned interacts with attract mode harmlessly: it settles in 11.4 s against a
 4 s kick period, so kicks would pile up — but choosing a preset is a click, and
