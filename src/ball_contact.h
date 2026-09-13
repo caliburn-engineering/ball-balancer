@@ -32,8 +32,9 @@ struct PlateMotion {
     /// **These are analytic, and that is not a refinement.**  They were a
     /// finite difference of `c_dot` and `omega` across consecutive frames,
     /// which is a defensible estimator for a smooth signal and these are not
-    /// smooth: the leg rate is `(cmd - alpha) / tau`, and `cmd` is a zero-order
-    /// hold that STEPS every time the loop changes its mind.  Differencing a
+    /// smooth: the leg rate is `servoRate`, which away from its limit is
+    /// `(cmd - alpha) / tau`, and `cmd` is a zero-order hold that STEPS every
+    /// time the loop changes its mind.  Differencing a
     /// step gives `1/dt`, so the estimator answered with a delta function
     /// wherever the command jumped.
     ///
@@ -45,13 +46,22 @@ struct PlateMotion {
     /// (`pathVelocity` says so), so this fired on every corner of every lap.
     ///
     /// Analytically the servo lag differentiates in closed form: `cmd` is held
-    /// across the frame, so `alpha_ddot = -alpha_dot / tau` exactly, and the
-    /// same Jacobian that carries `alpha_dot` to `pose_dot` carries this to
-    /// `pose_ddot`.  The one term left to difference is the Jacobian's own
-    /// change, and that is a function of the leg angles and the pose — both
-    /// continuous, neither of them stepping.  The corner then reads
-    /// `|omega_dot| = 50 rad/s^2`, which is what a servo with a 0.05 s lag
-    /// actually does when its command jumps.  See #23.
+    /// across the frame, so `alpha_ddot = -alpha_dot / tau` exactly while the
+    /// lag is what is limiting the leg, and the same Jacobian that carries
+    /// `alpha_dot` to `pose_dot` carries this to `pose_ddot`.  The one term
+    /// left to difference is the Jacobian's own change, and that is a function
+    /// of the leg angles and the pose — both continuous, neither of them
+    /// stepping.  The corner then reads `|omega_dot| = 50 rad/s^2`, which is
+    /// what a servo with a 0.05 s lag actually does when its command jumps.
+    /// See #23.
+    ///
+    /// **The lag is not always what is limiting the leg.**  Since #32 the servo
+    /// is rate-limited too, and while it is ramping `alpha_dot` is a constant
+    /// so `alpha_ddot` is exactly zero — these two vectors go to zero with it,
+    /// in the frames the loop is slamming hardest.  `servoRate` and
+    /// `servoAccel` are the single statement of both derivatives; a caller
+    /// deriving either from `(cmd - alpha) / tau` itself gets the unlimited
+    /// servo back and does not notice.
     Eigen::Vector3d c_ddot = Eigen::Vector3d::Zero();
     Eigen::Vector3d omega_dot = Eigen::Vector3d::Zero();
 
@@ -142,7 +152,15 @@ std::array<double, 3> servoRate(const std::array<double, 3>& alpha_rad,
 ///
 /// Saturation is read off `alpha_dot` rather than passed in, which is exact
 /// because `servoRate` clamps to `rate_max` itself and so lands on it bit for
-/// bit.
+/// bit.  That clamp is also why the test is `|alpha_dot| >= rate_max` rather
+/// than `>`: a ramping leg reports exactly the limit, so `>` would find no
+/// saturated leg at all.
+///
+/// At the handover exactly — `|cmd - alpha| = rate_max * tau`, where the lag
+/// alone would produce precisely `rate_max` — the two readings coincide and
+/// this reports the ramp's zero.  A measure-zero tie, broken toward the side
+/// the leg is arriving FROM; `stepServos` puts that same instant on the decay
+/// branch, so the pair disagree at one point and nowhere else.
 std::array<double, 3> servoAccel(const std::array<double, 3>& alpha_dot_rad_s,
                                  double tau,
                                  double rate_max);

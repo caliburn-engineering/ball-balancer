@@ -27,6 +27,17 @@
 /// the Aggressive preset, not a 250 mm/s corner.  The corner is #31's.
 inline constexpr double kServoRateMax = (60.0 * M_PI / 180.0) / 0.1;
 
+/// Is `rate_max` a limit worth enforcing?
+///
+/// Non-positive would freeze the legs rather than slow them and infinite is the
+/// absence of one, so both read as "unlimited".  Shared rather than restated,
+/// because the integrator (`stepServos`) and the derivatives (`servoRate`,
+/// `servoAccel`) all have to agree about what an absent limit is, and two
+/// copies of a predicate in two translation units is how they would stop.
+inline bool rateLimited(double rate_max) {
+    return rate_max > 0.0 && std::isfinite(rate_max);
+}
+
 /// Parameters defining the 3-RRS parallel mechanism geometry
 struct TableParams {
     double R_ground;    // Ground circle radius [m]

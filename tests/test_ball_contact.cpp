@@ -396,15 +396,23 @@ void test_a_stepped_command_is_not_an_infinite_acceleration() {
     const double home = M_PI / 4.0;
     const std::array<double, 3> alpha = {home, home, home};
     const std::array<double, 3> cmd = {home + 5.0 * kDeg, home, home};
-    std::array<double, 3> adot{};
-    for (int i = 0; i < 3; ++i) adot[i] = (cmd[i] - alpha[i]) / tau;
+
+    // `servoRate` rather than `(cmd - alpha) / tau` written out here.  The
+    // header says why — five harnesses and the application need this rate, and
+    // a sixth opinion about the servo model is how they come to disagree — and
+    // since #32 the difference is real: the hand-rolled form is the UNLIMITED
+    // servo, and feeding that to a rate-aware `servoAccel` pairs two different
+    // machines.
+    const std::array<double, 3> adot =
+        servoRate(alpha, cmd, tau, plate().alpha_rate_max);
 
     const TablePose pose = tk.home_pose(home);
     // The mechanism's own rate limit, not an absent one: 5 degrees through a
     // 0.05 s lag asks for 1.75 rad/s against a limit of 10.47, so the lag is
     // the slower of the two here and the analytic second derivative is the
-    // lag's.  `test_a_rate_saturated_leg_has_no_acceleration` is the other
-    // side of that.
+    // lag's.  `test_a_rate_saturated_leg_stops_accelerating_the_plate` is the
+    // other side of that.
+    ASSERT_NEAR(adot[0], (cmd[0] - alpha[0]) / tau, 1e-15);
     const std::array<double, 3> addot =
         servoAccel(adot, tau, plate().alpha_rate_max);
     for (int i = 0; i < 3; ++i) ASSERT_NEAR(addot[i], -adot[i] / tau, 1e-15);
@@ -544,7 +552,9 @@ void test_a_rate_saturated_leg_stops_accelerating_the_plate() {
 
 // A plate whose legs are moving at a CONSTANT rate has no acceleration to
 // speak of — `alpha_ddot = -alpha_dot / tau` is what a lag does when it is
-// chasing, and a leg already at its commanded angle is not.
+// chasing, and a leg already at its commanded angle is not.  A leg pinned at
+// its rate limit is the other way to be at a constant rate, and
+// `test_a_rate_saturated_leg_stops_accelerating_the_plate` is that one.
 void test_legs_at_their_command_produce_no_acceleration() {
     const TableKinematics tk(plate());
     const double home = M_PI / 4.0;

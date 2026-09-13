@@ -163,8 +163,17 @@ std::array<double, 3> stepServos(const std::array<double, 3>& alpha_rad,
     // point the ramp hands over at.  An absent limit pushes it to infinity,
     // which takes every leg down the exponential branch and reproduces the
     // unlimited servo bit for bit.
-    const bool limited = rate_max > 0.0 && std::isfinite(rate_max);
-    const double handover = limited ? rate_max * tau
+    //
+    // `max(tau, 0)` is what keeps a lagless servo lagless.  A negative tau
+    // would otherwise make the handover negative, which no error is below — so
+    // every leg would take the ramp, and the ramp would run for
+    // `(|err| - handover) / rate_max`, a time LONGER than it takes to reach
+    // `cmd`.  Measured before this guard: tau = -0.05 s drove a 0.1 rad step to
+    // 0.1745, 75% past the command, in a function whose header promises it
+    // cannot overshoot at any dt.  At zero the handover is zero, the ramp ends
+    // exactly on `cmd`, and the decay branch below lands there too.
+    const bool limited = rateLimited(rate_max);
+    const double handover = limited ? rate_max * std::max(tau, 0.0)
                                     : std::numeric_limits<double>::infinity();
 
     std::array<double, 3> next{};

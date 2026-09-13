@@ -399,6 +399,25 @@ void test_the_servo_cannot_be_driven_faster_than_its_rate_limit() {
     ASSERT_NEAR(ramped[0] - kHome, rate * dt, 1e-15);
     const std::array<double, 3> arrived = stepServos(alpha, far, 0.0, 1.0, rate);
     ASSERT_NEAR(arrived[0], far[0], 1e-15);
+
+    // **And a NEGATIVE tau is lagless too, which the first cut of this got
+    // wrong.**  `handover = rate * tau` goes negative, no error is below it, so
+    // every leg took the ramp — and took it for longer than it takes to reach
+    // the command.  A 0.1 rad step at tau = -0.05 landed on 0.1745, 75 per cent
+    // past `cmd`, in a function whose header promises it cannot overshoot at
+    // any dt.  Reachable only from a caller, since `cascadeServoTau` clamps at
+    // 1e-3 — but `stepServosOnPlate` takes tau from one.
+    for (double bad_tau : {0.0, -0.05, -10.0}) {
+        const std::array<double, 3> small =
+            stepServos({0.0, 0.0, 0.0}, {0.1, -0.1, 0.0}, bad_tau, dt, rate);
+        ASSERT_TRUE(small[0] >= 0.0 && small[0] <= 0.1);
+        ASSERT_TRUE(small[1] <= 0.0 && small[1] >= -0.1);
+        // Given long enough it arrives exactly, rather than sailing past.
+        const std::array<double, 3> done =
+            stepServos({0.0, 0.0, 0.0}, {0.1, -0.1, 0.0}, bad_tau, 1.0, rate);
+        ASSERT_NEAR(done[0], 0.1, 1e-15);
+        ASSERT_NEAR(done[1], -0.1, 1e-15);
+    }
 }
 
 // **The property the rate limit exists for.**

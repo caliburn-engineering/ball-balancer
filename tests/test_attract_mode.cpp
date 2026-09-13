@@ -529,6 +529,14 @@ void test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance() {
 // peak reach is 31.15 mm and 28.57 mm either way.  The single Aggressive frame
 // that ramps moves the worst leg rate in the sweep from 8.984 rad/s to 8.983.
 //
+// **Only the WITH-limit half of that is pinned below.**  The plant carries its
+// rate limit as a property of the mechanism, so a test cannot step an unlimited
+// plate without constructing a second one, and a `TableParams` built to be
+// wrong is a fixture that outlives the question it answered.  The without-limit
+// column was measured out of tree against `alpha_rate_max = infinity` and is
+// reported here as history.  What IS pinned is the fact the whole comparison
+// turns on: the worst leg error either tuning produces, against the handover.
+//
 // **That is the intended result, not a disappointment.**  Separation at this
 // disturbance is an acceleration phenomenon and this is a rate limit; they bind
 // in different regimes.  What the measurement buys is the knowledge that the

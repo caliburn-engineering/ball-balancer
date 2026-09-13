@@ -39,7 +39,12 @@ struct TrajectoryResult {
 
 /// Configuration for trajectory validation
 struct ValidatorConfig {
-    double omega_max = 10.0;          // Max servo angular velocity [rad/s]
+    /// Max servo angular velocity [rad/s].  The mechanism's own, not a second
+    /// opinion about it: this was an uncited 10.0 and #32 gave the plant a
+    /// cited 10.47, which would have left the validator rejecting leg rates the
+    /// plate is happy to produce.  Nothing constructs a `ValidatorConfig` today
+    /// — the first caller would have inherited the disagreement.
+    double omega_max = kServoRateMax;
     double condition_threshold = 50.0; // Condition number warning threshold
     double dt = 0.001;                 // Timestep for finite differences [s]
 };
