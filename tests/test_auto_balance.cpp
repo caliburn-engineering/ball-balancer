@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 
 using namespace caliburn;
@@ -297,30 +298,153 @@ void test_wrong_shape_commands_the_home_pose() {
     ASSERT_TRUE(!c.saturated);
 }
 
+// The lag, tested where the lag is what the servo is doing.  The command is
+// 0.2 rad from where the legs are, against a handover at `rate * tau` = 0.524,
+// so the rate limit never binds and this is the pure exponential it always was
+// — which is the point: the limit must be invisible in the regime the loop
+// spends its life in.  The command used to be 1.0 rad, which is twice the
+// handover and so no longer a test of the lag at all.
 void test_servo_lag_is_first_order() {
     const double tau = 0.05;
-    const std::array<double, 3> cmd = {1.0, 1.0, 1.0};
+    const double rate = kServoRateMax;
+    const std::array<double, 3> cmd = {0.2, 0.2, 0.2};
     std::array<double, 3> a = {0.0, 0.0, 0.0};
 
     // One time constant, reached in one step and in many: the exact form makes
     // the answer independent of how the interval was subdivided.
-    const std::array<double, 3> one_shot = stepServos(a, cmd, tau, tau);
-    ASSERT_NEAR(one_shot[0], 1.0 - std::exp(-1.0), 1e-12);
+    const std::array<double, 3> one_shot = stepServos(a, cmd, tau, tau, rate);
+    ASSERT_NEAR(one_shot[0], 0.2 * (1.0 - std::exp(-1.0)), 1e-12);
 
-    for (int k = 0; k < 100; ++k) a = stepServos(a, cmd, tau, tau / 100.0);
-    ASSERT_NEAR(a[0], 1.0 - std::exp(-1.0), 1e-9);
+    for (int k = 0; k < 100; ++k) a = stepServos(a, cmd, tau, tau / 100.0, rate);
+    ASSERT_NEAR(a[0], 0.2 * (1.0 - std::exp(-1.0)), 1e-9);
 
     // No step, no motion — and no division by a zero tau.
-    const std::array<double, 3> still = stepServos(a, cmd, tau, 0.0);
+    const std::array<double, 3> still = stepServos(a, cmd, tau, 0.0, rate);
     ASSERT_NEAR(still[0], a[0], 1e-15);
-    const std::array<double, 3> degenerate = stepServos(a, cmd, 0.0, 1.0 / 60.0);
+    const std::array<double, 3> degenerate =
+        stepServos(a, cmd, 0.0, 1.0 / 60.0, rate);
     ASSERT_TRUE(std::isfinite(degenerate[0]));
 
     // Each leg keeps its own command.
     const std::array<double, 3> mixed =
-        stepServos({0.0, 0.0, 0.0}, {1.0, -1.0, 0.0}, tau, tau);
+        stepServos({0.0, 0.0, 0.0}, {0.2, -0.2, 0.0}, tau, tau, rate);
     ASSERT_TRUE(mixed[0] > 0.0 && mixed[1] < 0.0);
     ASSERT_NEAR(mixed[2], 0.0, 1e-15);
+
+    // And an absent limit is the unlimited servo, bit for bit, at an error far
+    // past where the limit would have bound.  This is what says the piecewise
+    // form did not quietly change the lag.
+    for (double r : {0.0, -1.0, std::numeric_limits<double>::infinity()}) {
+        const std::array<double, 3> free_run =
+            stepServos({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}, tau, tau, r);
+        ASSERT_NEAR(free_run[0], 1.0 - std::exp(-1.0), 1e-15);
+    }
+}
+
+// The rate limit itself: what it is, when it engages, and that it cannot make
+// the integration oscillate.
+//
+// The handover is at `|cmd - alpha| = rate * tau`, which against the shipped
+// 10.47 rad/s and 0.05 s lag is 30 degrees of leg error — deliberately large.
+// See `kServoRateMax`: this is insurance for a saturated kick recovery, not the
+// fix for a corner, which is #31's.
+void test_the_servo_cannot_be_driven_faster_than_its_rate_limit() {
+    const double tau = 0.05;
+    const double rate = kServoRateMax;
+    const double dt = 1.0 / 60.0;
+
+    // 30 degrees exactly, which is where the two branches meet.
+    ASSERT_NEAR(rate * tau, 30.0 * kDeg, 1e-12);
+
+    // A full-travel command jump: 70 degrees, far past the handover.  The leg
+    // moves `rate * dt` and not a radian more, whichever way it was sent.
+    const std::array<double, 3> far = {kHome + 70.0 * kDeg, kHome - 70.0 * kDeg,
+                                       kHome};
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+    const std::array<double, 3> one = stepServos(alpha, far, tau, dt, rate);
+    ASSERT_NEAR(one[0] - kHome, rate * dt, 1e-15);
+    ASSERT_NEAR(one[1] - kHome, -rate * dt, 1e-15);
+    ASSERT_NEAR(one[2], kHome, 1e-15);
+
+    // Unlimited, the same frame would have moved 1.98 times as far — an
+    // average rate of 20.8 rad/s, twice what the servo can do.  So this is a
+    // limit that actually bit rather than a no-op dressed as one.
+    const std::array<double, 3> free_run =
+        stepServos(alpha, far, tau, dt, std::numeric_limits<double>::infinity());
+    ASSERT_NEAR((free_run[0] - kHome) / (rate * dt), 1.984, 1e-3);
+
+    // No dt can overshoot the command, at any subdivision, from either side.
+    // A forward-Euler rate limiter would sail past `cmd` for a large enough dt
+    // and then oscillate; this cannot, because the ramp stops at the handover
+    // and the exact decay finishes the step.
+    for (double step : {1e-4, 1.0 / 240.0, dt, 0.05, 0.2, 1.0, 10.0}) {
+        const std::array<double, 3> n = stepServos(alpha, far, tau, step, rate);
+        ASSERT_TRUE(n[0] >= kHome && n[0] <= far[0]);
+        ASSERT_TRUE(n[1] <= kHome && n[1] >= far[1]);
+    }
+
+    // And subdividing gives the same answer as one shot, which is what
+    // "closed form" is worth: the handover is resolved analytically rather
+    // than landed on by luck of the frame boundary.
+    std::array<double, 3> walked = alpha;
+    for (int k = 0; k < 2000; ++k)
+        walked = stepServos(walked, far, tau, 0.2 / 2000.0, rate);
+    const std::array<double, 3> at_once = stepServos(alpha, far, tau, 0.2, rate);
+    ASSERT_NEAR(walked[0], at_once[0], 1e-9);
+    ASSERT_NEAR(walked[1], at_once[1], 1e-9);
+
+    // A lagless servo under a rate limit is a pure ramp that stops on the
+    // command rather than overshooting it.
+    const std::array<double, 3> ramped = stepServos(alpha, far, 0.0, dt, rate);
+    ASSERT_NEAR(ramped[0] - kHome, rate * dt, 1e-15);
+    const std::array<double, 3> arrived = stepServos(alpha, far, 0.0, 1.0, rate);
+    ASSERT_NEAR(arrived[0], far[0], 1e-15);
+}
+
+// **The property the rate limit exists for.**
+//
+// While the ramp is in charge `alpha_dot` is the constant `rate`, so
+// `alpha_ddot` is exactly zero — and `alpha_ddot` is what drives the `c_ddot`
+// and `omega_dot` terms that decide whether the ball separates.  The plate's
+// heave acceleration vanishes precisely when the loop is slamming hardest.
+//
+// Asserted as an exact zero rather than a small number, because it is one: the
+// second difference of a constant-rate ramp is zero in floating point too.
+void test_a_rate_saturated_leg_has_no_acceleration() {
+    const double tau = 0.05;
+    const double rate = kServoRateMax;
+    const double dt = 1.0 / 60.0;
+    const std::array<double, 3> far = {kHome + 70.0 * kDeg, kHome, kHome};
+
+    // Three frames of ramp, and the second difference of the leg angle is
+    // exactly zero — the integrated form of `alpha_ddot = 0`.
+    std::array<double, 3> a0 = {kHome, kHome, kHome};
+    const std::array<double, 3> a1 = stepServos(a0, far, tau, dt, rate);
+    const std::array<double, 3> a2 = stepServos(a1, far, tau, dt, rate);
+    const std::array<double, 3> a3 = stepServos(a2, far, tau, dt, rate);
+    ASSERT_EQ((a2[0] - a1[0]) - (a1[0] - a0[0]), 0.0);
+    ASSERT_EQ((a3[0] - a2[0]) - (a2[0] - a1[0]), 0.0);
+
+    // And the analytic rate the plate is handed agrees with that: saturated at
+    // the limit, with a second derivative of exactly zero.
+    const std::array<double, 3> rate_1 = servoRate(a1, far, tau, rate);
+    ASSERT_NEAR(rate_1[0], rate, 1e-15);
+    ASSERT_EQ(servoAccel(rate_1, tau, rate)[0], 0.0);
+    // The legs that were not asked to move are untouched by any of it.
+    ASSERT_EQ(rate_1[1], 0.0);
+    ASSERT_EQ(servoAccel(rate_1, tau, rate)[1], 0.0);
+
+    // At the handover the acceleration comes back, at the magnitude an
+    // unlimited servo would have had all along — later, and from a smaller
+    // error.  Strictly better, never worse.
+    const std::array<double, 3> at_handover = {far[0] - rate * tau, kHome, kHome};
+    const std::array<double, 3> rate_h = servoRate(at_handover, far, tau, rate);
+    ASSERT_NEAR(rate_h[0], rate, 1e-12);
+    const std::array<double, 3> just_inside = {far[0] - 0.999 * rate * tau,
+                                               kHome, kHome};
+    const std::array<double, 3> rate_i = servoRate(just_inside, far, tau, rate);
+    ASSERT_NEAR(servoAccel(rate_i, tau, rate)[0], -rate_i[0] / tau, 1e-12);
+    ASSERT_TRUE(std::abs(servoAccel(rate_i, tau, rate)[0]) > 200.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -734,6 +858,8 @@ int main() {
     test_a_reachable_clamp_is_left_on_the_stop();
     test_wrong_shape_commands_the_home_pose();
     test_servo_lag_is_first_order();
+    test_the_servo_cannot_be_driven_faster_than_its_rate_limit();
+    test_a_rate_saturated_leg_has_no_acceleration();
     test_default_weights_balance_the_ball();
     test_default_weights_reject_a_nudge();
     test_setpoint_is_tracked();

@@ -1,6 +1,9 @@
 // src/ball_contact.cpp
 #include "ball_contact.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace caliburn {
 namespace {
 
@@ -9,13 +12,46 @@ Eigen::Vector3d vee(const Eigen::Matrix3d& S) {
     return Eigen::Vector3d(S(2, 1), S(0, 2), S(1, 0));
 }
 
+/// A rate limit worth enforcing.  Non-positive would freeze the legs and
+/// infinite is the absence of one, so both mean "unlimited" — the same reading
+/// `stepServos` takes.
+bool rateLimited(double rate_max) {
+    return rate_max > 0.0 && std::isfinite(rate_max);
+}
+
 }  // namespace
 
+std::array<double, 3> servoRate(const std::array<double, 3>& alpha_rad,
+                                const std::array<double, 3>& cmd_rad,
+                                double tau,
+                                double rate_max) {
+    const bool limited = rateLimited(rate_max);
+    std::array<double, 3> out{};
+    for (int i = 0; i < 3; ++i) {
+        const double err = cmd_rad[i] - alpha_rad[i];
+        if (tau > 0.0) {
+            const double lag = err / tau;
+            out[i] = limited ? std::clamp(lag, -rate_max, rate_max) : lag;
+        } else if (limited && err != 0.0) {
+            // No lag to slow it, so the limit is the whole model.
+            out[i] = (err > 0.0) ? rate_max : -rate_max;
+        }
+    }
+    return out;
+}
+
 std::array<double, 3> servoAccel(const std::array<double, 3>& alpha_dot_rad_s,
-                                 double tau) {
-    if (tau <= 0.0) return {0.0, 0.0, 0.0};
-    return {-alpha_dot_rad_s[0] / tau, -alpha_dot_rad_s[1] / tau,
-            -alpha_dot_rad_s[2] / tau};
+                                 double tau,
+                                 double rate_max) {
+    const bool limited = rateLimited(rate_max);
+    std::array<double, 3> out{};
+    for (int i = 0; i < 3; ++i) {
+        const double rate = alpha_dot_rad_s[i];
+        if (limited && std::abs(rate) >= rate_max) continue;   // ramping: zero
+        if (tau <= 0.0) continue;
+        out[i] = -rate / tau;
+    }
+    return out;
 }
 
 PlateMotion plateMotion(const TableKinematics& tk,

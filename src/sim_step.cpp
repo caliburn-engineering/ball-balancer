@@ -155,9 +155,12 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
 
     // --- 5. The plate's motion ---
     //
-    // The legs' rate is the servo lag's own derivative rather than a
-    // difference: `alpha_dot = (cmd - alpha) / tau` is exactly what the model
-    // says they are doing, and it costs nothing to ask it.
+    // The legs' rate is the servo's own derivative rather than a difference:
+    // `servoRate` is exactly what the model says they are doing, and it costs
+    // nothing to ask it.  It is the SAME rate limit `stepServosOnPlate` just
+    // integrated through, so a leg that was ramped this frame reports the rate
+    // it was ramped at and an `alpha_ddot` of zero — which is the property #32
+    // exists for.
     //
     // Taken at the legs' position AFTER the step, because that is the instant
     // `pose` is for.  The five copies of this loop disagreed about that, and
@@ -165,14 +168,12 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
     // across the frame, a factor of 1.40 at 60 Hz against a 0.05 s lag, and it
     // multiplies straight through to `omega`, to `omega_dot`, and so to
     // whether the ball leaves the plate at all.
-    std::array<double, 3> alpha_dot{};
-    if (in.design.servo_tau > 0.0) {
-        for (int i = 0; i < 3; ++i)
-            alpha_dot[i] = (cmd_rad[i] - s.alpha_rad[i]) / in.design.servo_tau;
-    }
+    const double rate_max = tk.params().alpha_rate_max;
+    const std::array<double, 3> alpha_dot =
+        servoRate(s.alpha_rad, cmd_rad, in.design.servo_tau, rate_max);
     s.motion_prev = s.motion;
     s.motion = plateMotion(tk, s.pose, s.alpha_rad, alpha_dot,
-                           servoAccel(alpha_dot, in.design.servo_tau),
+                           servoAccel(alpha_dot, in.design.servo_tau, rate_max),
                            &s.motion_prev, in.dt);
 
     // --- 6. The ball ---

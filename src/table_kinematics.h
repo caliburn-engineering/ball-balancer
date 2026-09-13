@@ -5,6 +5,28 @@
 #include <optional>
 #include <cmath>
 
+/// The fastest a leg can be driven, in rad/s — the mechanism's default, and
+/// the value `TableParams::alpha_rate_max` opens on.
+///
+/// **Cited, not chosen.**  0.1 s per 60 deg is the speed a high-torque digital
+/// servo delivers, and that is the class a 600 mm table on 150 mm legs would
+/// actually be built from.  60 deg in 0.1 s is 10.47 rad/s.  Written as the
+/// arithmetic rather than as 10.5 so the number on screen and the servo it
+/// comes from cannot drift apart.
+///
+/// Why the plant needs it at all: `stepServos` models a servo as a first-order
+/// lag, and **a first-order lag has unbounded initial rate**.  A real servo does
+/// not.  The missing property showed up as plate heave acceleration with
+/// nothing bounding it, which is the quantity that decides whether the ball
+/// separates.  Decided in D6/D7 of
+/// `docs/plans/2026-09-09-bouncing-ball-control-decisions.md`; see
+/// [#32](https://github.com/caliburn-engineering/caliburn/issues/32).
+///
+/// It engages at `|cmd - alpha| > rate * tau`, which against the shipped
+/// tau = 0.05 s is 30 deg of leg error exactly — a saturated kick recovery or
+/// the Aggressive preset, not a 250 mm/s corner.  The corner is #31's.
+inline constexpr double kServoRateMax = (60.0 * M_PI / 180.0) / 0.1;
+
 /// Parameters defining the 3-RRS parallel mechanism geometry
 struct TableParams {
     double R_ground;    // Ground circle radius [m]
@@ -14,6 +36,14 @@ struct TableParams {
     double alpha_min;   // Minimum servo angle [rad] (≈ 10°)
     double alpha_max;   // Maximum servo angle [rad] (≈ 80°)
     double gamma_offset = 0.0; // Angular offset between ground and table triads [rad]
+
+    /// Maximum leg rate [rad/s].  A servo property, so it sits beside the
+    /// travel limits rather than in the controller — see `kServoRateMax`, which
+    /// says where the number comes from.  Defaulted rather than set at each
+    /// construction site, unlike the travel limits, so that a harness which
+    /// builds a `TableParams` cannot accidentally build one with an infinitely
+    /// fast servo.
+    double alpha_rate_max = kServoRateMax;
 };
 
 /// Table pose: roll (phi), pitch (theta), heave (z_c)

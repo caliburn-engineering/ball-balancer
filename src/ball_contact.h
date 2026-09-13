@@ -93,10 +93,9 @@ struct PlateMotion {
 /// Assemble the plate's motion from where the legs are and how they are moving.
 ///
 /// `alpha_dot` and `alpha_ddot` are both exact rather than differenced: the
-/// servos are a first-order lag, so `alpha_dot = (cmd - alpha) / tau` is the
-/// model's own derivative and `alpha_ddot = -alpha_dot / tau` its own second,
-/// for as long as `cmd` is held — which is the whole frame.  `servoAccel`
-/// writes that down so no caller has to.
+/// servos are a rate-limited first-order lag, so `servoRate` is the model's own
+/// derivative and `servoAccel` its own second, for as long as `cmd` is held —
+/// which is the whole frame.  The two write that down so no caller has to.
 ///
 /// `prev` supplies the previous frame's `J_v` and `A` so their rates of change
 /// can be differenced.  Passing `nullptr` drops those two terms, which is right
@@ -111,14 +110,42 @@ PlateMotion plateMotion(const TableKinematics& tk,
                         const PlateMotion* prev = nullptr,
                         double dt = 0.0);
 
-/// The servo lag's own second derivative: `alpha_ddot = -alpha_dot / tau`.
+/// The rate-limited servo's own first derivative:
+///
+///     alpha_dot = clamp((cmd - alpha) / tau, -rate_max, +rate_max)
 ///
 /// Exact while the command is held, which it is for the whole frame.  Here
 /// rather than at each call site because five harnesses and the application all
 /// need it and a sixth opinion about the servo model is how they come to
-/// disagree.
+/// disagree — and the clamp above is the same handover `stepServos` integrates
+/// through, so the rate the plate reports is the rate the legs are actually
+/// moving at.
+///
+/// A lagless servo (`tau <= 0`) is driven entirely by the limit: it closes any
+/// error at `rate_max` and reports zero only once there is none.  Without a
+/// limit its rate is unbounded and so unrepresentable, and it reports zero, as
+/// it did before the limit existed.
+std::array<double, 3> servoRate(const std::array<double, 3>& alpha_rad,
+                                const std::array<double, 3>& cmd_rad,
+                                double tau,
+                                double rate_max);
+
+/// The rate-limited servo's own second derivative: `-alpha_dot / tau` while the
+/// lag is in charge, and **exactly zero while the rate limit is**.
+///
+/// That zero is the whole reason the rate limit is worth having.  `c_ddot` and
+/// `omega_dot` are the terms that decide whether the ball separates, and they
+/// are driven by `alpha_ddot` — which now vanishes precisely when the loop is
+/// slamming the legs hardest.  At the handover `alpha_ddot` jumps to
+/// `-alpha_dot / tau`, the same magnitude an unlimited servo would have had,
+/// but later and from a smaller error: strictly better, never worse.  See #32.
+///
+/// Saturation is read off `alpha_dot` rather than passed in, which is exact
+/// because `servoRate` clamps to `rate_max` itself and so lands on it bit for
+/// bit.
 std::array<double, 3> servoAccel(const std::array<double, 3>& alpha_dot_rad_s,
-                                 double tau);
+                                 double tau,
+                                 double rate_max);
 
 /// The normal force per unit mass holding the ball on the plate, `N / m`.
 ///

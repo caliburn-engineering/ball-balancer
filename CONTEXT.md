@@ -416,9 +416,47 @@ is an algebraic loop on the leg states — the gain would have been reacting to
 its own command one frame earlier.  The servo dynamics the cascade model claims
 had to become real in the simulator for the design to mean anything.
 
-The lag is integrated exactly, `alpha <- cmd + (alpha - cmd)*exp(-dt/tau)`, not
-by forward Euler: the plate runs at a fixed 60 Hz and tau defaults to 0.05 s,
-three steps per time constant, and the tau slider goes lower still.
+The lag is integrated in closed form, not by forward Euler: the plate runs at a
+fixed 60 Hz and tau defaults to 0.05 s, three steps per time constant, and the
+tau slider goes lower still.
+
+**The servo is rate-limited as well as lagged, which makes that integral
+piecewise** (#32).  A first-order lag has unbounded initial rate and a real
+servo does not, so `TableParams::alpha_rate_max` caps it at **10.47 rad/s** —
+0.1 s per 60 degrees, the class of high-torque digital servo a 600 mm table on
+150 mm legs would be built from, written as the arithmetic rather than as a
+rounded 10.5.  It is a property of the mechanism, so it lives beside the travel
+limits and is enforced in `stepServos` / `stepServosOnPlate`, where every
+harness inherits it — not as a clamp on the command in `legCommand`, which
+would make it a controller choice.
+
+    e = cmd - alpha,  and the lag takes over at |e| = rate_max * tau
+
+    |e| <= rate_max * tau :  alpha <- cmd + (alpha - cmd) exp(-dt/tau)
+    otherwise, t_r = (|e| - rate_max * tau) / rate_max :
+        dt <= t_r :  alpha <- alpha + sign(e) rate_max dt
+        dt >  t_r :  alpha <- cmd - sign(e) rate_max tau exp(-(dt - t_r)/tau)
+
+Both branches are closed form and neither can overshoot at any `dt`, so the
+reason the exact form exists at all survives the change: the ramp stops at the
+handover rather than past it, and the decay approaches `cmd` without reaching
+it.
+
+**The handover is at 30.00 degrees of leg error** against the shipped tau, which
+is deliberately large — this is insurance for a saturated kick recovery, not the
+fix for a corner, which is #31's.  Measured over 72 directions at the demo's own
+0.26 m/s Nudge, the worst leg error a frame produces is **27.30 degrees under
+Nominal** and **30.26 under Aggressive**: the limit never engages under the
+shipped tuning and engages on a single frame out of 187,920 leg-frames under
+Aggressive.  Nothing separates either way, the normal-force margin is 1.913 m/s²
+Nominal and 1.354 Aggressive with and without it, and the peak reach is 31.15 mm
+and 28.57 mm either way.  Pinned in
+`test_the_rate_limit_is_insurance_rather_than_a_tax`.
+
+**K is unchanged, and so is the linearised cascade model.**  Same reasoning as
+the travel clamp: a saturation outside the design model, accepted and
+documented, not a redesign trigger.  The cascade plant's servo block is still
+`-1/tau` per leg and nothing else, which `test_servo_block` pins.
 
 ### Assembly mode
 
@@ -509,10 +547,11 @@ Decided in [#29](https://github.com/caliburn-engineering/caliburn/issues/29).
 > the gain running out rather than to a jump.  At `Q = 2000` the count runs 0 at
 > 0.43 m/s, 3 at 0.60, 18 at 0.80, 21 at 1.00 and 0 again at 1.50.
 >
-> **#32's rate limit would not close this**, which is worth saying because it
-> looks as though it would.  A 10.5 rad/s servo caps a 60 Hz frame at 10.0
+> **#32's rate limit does not close this**, which is worth saying because it
+> looks as though it would.  A 10.47 rad/s servo caps a 60 Hz frame at 10.00
 > degrees of leg travel, and one of the three jumps above happens on a step of
 > **8.79 degrees**.  Capping the input is not the same as the solve being right.
+> The limit has since landed and this is still open.
 >
 > The fix is not a threshold either.  `can_hold` already defines the command set
 > by the level-seeded root, so the honest rule is that `solve_pose` must return
@@ -875,7 +914,13 @@ the timestep shrank rather than converging.
 
 The servo lag differentiates in closed form instead.  `cmd` is held across the
 whole frame, so `α̈ = −α̇/τ` exactly, and the same Jacobian that carries `α̇` to
-the pose rates carries it to the pose accelerations.  What is left to difference
+the pose rates carries it to the pose accelerations.  `servoRate` and
+`servoAccel` are the single statement of both, and they carry the rate limit
+with them: while a leg is ramping, `α̇` is the constant `rate_max` and **`α̈` is
+exactly zero**, so the `c̈` and `ω̇` terms that decide separation vanish precisely
+when the loop is slamming hardest.  At the handover `α̈` jumps to `−α̇/τ`, the
+same magnitude an unlimited servo would have had, but later and from a smaller
+error — strictly better, never worse (#32).  What is left to difference
 is how `J_v` and the tilt-rate map are themselves changing, and those are
 functions of the leg angles and the pose: continuous, neither of them stepping.
 Both history terms are load-bearing — dropping them gets `ω̇` wrong by 13% and

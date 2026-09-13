@@ -16,6 +16,7 @@
 #include "test_helpers.h"
 
 #include <cmath>
+#include <limits>
 
 using namespace caliburn;
 
@@ -399,7 +400,13 @@ void test_a_stepped_command_is_not_an_infinite_acceleration() {
     for (int i = 0; i < 3; ++i) adot[i] = (cmd[i] - alpha[i]) / tau;
 
     const TablePose pose = tk.home_pose(home);
-    const std::array<double, 3> addot = servoAccel(adot, tau);
+    // The mechanism's own rate limit, not an absent one: 5 degrees through a
+    // 0.05 s lag asks for 1.75 rad/s against a limit of 10.47, so the lag is
+    // the slower of the two here and the analytic second derivative is the
+    // lag's.  `test_a_rate_saturated_leg_has_no_acceleration` is the other
+    // side of that.
+    const std::array<double, 3> addot =
+        servoAccel(adot, tau, plate().alpha_rate_max);
     for (int i = 0; i < 3; ++i) ASSERT_NEAR(addot[i], -adot[i] / tau, 1e-15);
 
     // Two frame rates, and the acceleration is the same at both.  A difference
@@ -488,6 +495,53 @@ void test_the_analytic_acceleration_matches_a_difference_where_one_is_valid() {
     ASSERT_TRUE(partial.c_ddot(2) * c_ddot_fd(2) < 0.0);
 }
 
+// **What the rate limit buys the ball, measured on the plate itself.**
+//
+// A leg driven past its rate limit is ramping at a constant rate, so its
+// `alpha_ddot` is zero — and `alpha_ddot` is the only thing feeding
+// `omega_dot` and `c_ddot` on a plate whose Jacobian has not moved yet.  The
+// two terms that decide separation are therefore exactly zero in the frame the
+// loop is slamming hardest, which is the frame they used to be largest in.
+//
+// The unlimited servo is run beside it so the size of what was removed is on
+// the record rather than asserted in the abstract.
+void test_a_rate_saturated_leg_stops_accelerating_the_plate() {
+    const TableParams tp = plate();
+    const TableKinematics tk(tp);
+    const double tau = 0.05;
+    const double home = M_PI / 4.0;
+
+    // A full-travel command jump on one leg — a saturated kick recovery, which
+    // is the case `kServoRateMax` is insurance for.
+    const std::array<double, 3> alpha = {home, home, home};
+    const std::array<double, 3> cmd = {home + 70.0 * kDeg, home, home};
+    const TablePose pose = tk.home_pose(home);
+
+    const std::array<double, 3> adot =
+        servoRate(alpha, cmd, tau, tp.alpha_rate_max);
+    ASSERT_NEAR(adot[0], tp.alpha_rate_max, 1e-15);
+    const std::array<double, 3> addot =
+        servoAccel(adot, tau, tp.alpha_rate_max);
+    ASSERT_EQ(addot[0], 0.0);
+
+    const PlateMotion sat = plateMotion(tk, pose, alpha, adot, addot);
+    ASSERT_NEAR(sat.omega_dot.norm(), 0.0, 1e-12);
+    ASSERT_NEAR(sat.c_ddot.norm(), 0.0, 1e-12);
+    // The plate has not stopped — it is turning at 4.94 rad/s.  It has stopped
+    // CHANGING how fast it turns, which is the quantity the ball feels.
+    ASSERT_NEAR(sat.omega.norm(), 4.937, 1e-3);
+
+    // The same command through a servo with no rate limit.  This is what the
+    // ball used to be asked to hold on through.
+    const double no_limit = std::numeric_limits<double>::infinity();
+    const std::array<double, 3> free_dot = servoRate(alpha, cmd, tau, no_limit);
+    const PlateMotion free_run =
+        plateMotion(tk, pose, alpha, free_dot,
+                    servoAccel(free_dot, tau, no_limit));
+    ASSERT_NEAR(free_run.omega_dot.norm(), 230.4, 0.5);
+    ASSERT_NEAR(free_run.c_ddot(2), -34.6, 0.5);
+}
+
 // A plate whose legs are moving at a CONSTANT rate has no acceleration to
 // speak of — `alpha_ddot = -alpha_dot / tau` is what a lag does when it is
 // chasing, and a leg already at its commanded angle is not.
@@ -497,8 +551,9 @@ void test_legs_at_their_command_produce_no_acceleration() {
     const std::array<double, 3> alpha = {home, home, home};
     const TablePose pose = tk.home_pose(home);
 
-    const PlateMotion m = plateMotion(tk, pose, alpha, {0.0, 0.0, 0.0},
-                                      servoAccel({0.0, 0.0, 0.0}, 0.05));
+    const PlateMotion m = plateMotion(
+        tk, pose, alpha, {0.0, 0.0, 0.0},
+        servoAccel({0.0, 0.0, 0.0}, 0.05, plate().alpha_rate_max));
     ASSERT_NEAR(m.omega.norm(), 0.0, 1e-12);
     ASSERT_NEAR(m.omega_dot.norm(), 0.0, 1e-12);
     ASSERT_NEAR(m.c_ddot.norm(), 0.0, 1e-12);
@@ -527,6 +582,7 @@ int main() {
     test_a_trustworthy_frame_after_an_untrusted_one_still_declines();
     test_the_trust_threshold_is_the_condition_number_the_app_shows();
     test_a_stepped_command_is_not_an_infinite_acceleration();
+    test_a_rate_saturated_leg_stops_accelerating_the_plate();
     test_legs_at_their_command_produce_no_acceleration();
     test_the_analytic_acceleration_matches_a_difference_where_one_is_valid();
     std::printf("test_ball_contact: all passed\n");

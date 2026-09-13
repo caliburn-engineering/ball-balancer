@@ -64,6 +64,13 @@ void test_dimensions() {
 }
 
 // --- The servo block is a first-order lag per leg, and nothing else ---
+//
+// "Nothing else" now carries a second job.  The plant's servos gained a rate
+// limit in #32, and the limit deliberately did NOT come with it: it is a
+// saturation outside the design model, accepted and documented exactly as the
+// travel clamp is, not a redesign trigger.  `A(i,i) = -1/tau` with nothing
+// beside it is what says the linearised cascade model — and so K, which is
+// designed against it — is unchanged.
 void test_servo_block() {
     const auto models = getBuiltinModels();
     const auto& e = cascadeModel(models);

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace caliburn {
 
@@ -151,14 +152,44 @@ LegCommand legCommand(const TableKinematics& tk,
 std::array<double, 3> stepServos(const std::array<double, 3>& alpha_rad,
                                  const std::array<double, 3>& cmd_rad,
                                  double tau,
-                                 double dt) {
+                                 double dt,
+                                 double rate_max) {
     // tau <= 0 is a servo with no lag at all, which is what the plate had
     // before this existed.  It is reachable from the model panel's slider only
     // at its floor, but a degenerate tau must not divide.
     const double decay = (tau > 0.0) ? std::exp(-dt / tau) : 0.0;
+
+    // The error at which the lag becomes the slower of the two, and so the
+    // point the ramp hands over at.  An absent limit pushes it to infinity,
+    // which takes every leg down the exponential branch and reproduces the
+    // unlimited servo bit for bit.
+    const bool limited = rate_max > 0.0 && std::isfinite(rate_max);
+    const double handover = limited ? rate_max * tau
+                                    : std::numeric_limits<double>::infinity();
+
     std::array<double, 3> next{};
-    for (int i = 0; i < 3; ++i)
-        next[i] = cmd_rad[i] + (alpha_rad[i] - cmd_rad[i]) * decay;
+    for (int i = 0; i < 3; ++i) {
+        const double err = cmd_rad[i] - alpha_rad[i];
+        if (std::abs(err) <= handover) {
+            next[i] = cmd_rad[i] - err * decay;
+            continue;
+        }
+        // Rate-saturated.  Ramp at the limit for as long as the error stays
+        // above the handover — the error falls at exactly `rate_max`, so that
+        // time is known in closed form rather than searched for.
+        const double dir = (err > 0.0) ? 1.0 : -1.0;
+        const double ramp_s = (std::abs(err) - handover) / rate_max;
+        if (dt <= ramp_s) {
+            next[i] = alpha_rad[i] + dir * rate_max * dt;
+        } else {
+            // Handed over mid-frame: the rest of the step is the exact decay,
+            // started from the handover error rather than from where the leg
+            // began.  `handover` is zero for a lagless servo, which lands the
+            // leg on `cmd` and never divides by tau.
+            const double rest = (tau > 0.0) ? std::exp(-(dt - ramp_s) / tau) : 0.0;
+            next[i] = cmd_rad[i] - dir * handover * rest;
+        }
+    }
     return next;
 }
 
@@ -184,8 +215,11 @@ std::array<double, 3> stepServosOnPlate(const TableKinematics& tk,
                                         double dt) {
     // Where the legs ARE is the safe end: they started at home and have never
     // been moved anywhere the plate cannot be held, so it holds by induction.
-    return retreatToHoldable(tk, stepServos(alpha_rad, cmd_rad, tau, dt),
-                             alpha_rad, kRatesUntrustworthyAbove).alpha_rad;
+    return retreatToHoldable(
+               tk,
+               stepServos(alpha_rad, cmd_rad, tau, dt,
+                          tk.params().alpha_rate_max),
+               alpha_rad, kRatesUntrustworthyAbove).alpha_rad;
 }
 
 namespace {

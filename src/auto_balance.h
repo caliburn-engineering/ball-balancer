@@ -229,18 +229,37 @@ Eigen::Vector2d predictedLanding(const Eigen::Matrix<double, 6, 1>& ball_plate,
                                  double ball_radius,
                                  double gravity);
 
-/// Advance the three first-order servos one step, integrated exactly:
+/// Advance the three rate-limited first-order servos one step, in closed form.
 ///
-///     alpha <- cmd + (alpha - cmd) * exp(-dt / tau)
+/// The servo is a first-order lag that cannot be driven faster than
+/// `rate_max`, so the step is **piecewise** — ramp at the limit until the error
+/// has come down to where the lag is the slower of the two, then decay exactly:
 ///
-/// Exact rather than forward-Euler because the plate runs at a fixed 60 Hz
-/// against tau = 0.05 s — three steps per time constant, where Euler already
-/// overshoots, and where a user dragging tau below 1/30 s would make Euler
-/// oscillate and then diverge.  The exponential form cannot, at any dt.
+///     e = cmd - alpha,  and the lag takes over at |e| = rate_max * tau
+///
+///     |e| <= rate_max * tau :  alpha <- cmd + (alpha - cmd) exp(-dt / tau)
+///     otherwise, with t_r = (|e| - rate_max * tau) / rate_max :
+///         dt <= t_r :  alpha <- alpha + sign(e) rate_max dt
+///         dt >  t_r :  alpha <- cmd - sign(e) rate_max tau exp(-(dt - t_r) / tau)
+///
+/// This header used to claim "integrated exactly" and the claim was doing real
+/// work, so it is rewritten rather than quietly weakened.  **Both branches are
+/// still closed form and neither can overshoot at any dt**: the ramp is capped
+/// at `t_r` so it stops at the handover rather than past it, and the decay
+/// approaches `cmd` without reaching it.  That matters because the plate runs
+/// at a fixed 60 Hz against tau = 0.05 s — three steps per time constant, where
+/// forward Euler already overshoots, and a user dragging tau below 1/30 s would
+/// make Euler oscillate and then diverge.
+///
+/// `rate_max` comes from `TableParams::alpha_rate_max`; a non-positive or
+/// non-finite one means no limit and recovers the pure exponential exactly, the
+/// same way `tau <= 0` means no lag.  Why a servo has a rate at all, and where
+/// 10.47 rad/s comes from, is at `kServoRateMax`.
 std::array<double, 3> stepServos(const std::array<double, 3>& alpha_rad,
                                  const std::array<double, 3>& cmd_rad,
                                  double tau,
-                                 double dt);
+                                 double dt,
+                                 double rate_max);
 
 /// The same step, stopped at the workspace boundary.
 ///
@@ -253,6 +272,11 @@ std::array<double, 3> stepServos(const std::array<double, 3>& alpha_rad,
 ///
 /// The legs stop where the mechanism stops them, which is what a real one
 /// does when it is driven into a bind.
+///
+/// The rate limit is not a parameter here: it is `tk.params().alpha_rate_max`,
+/// because it is a property of the mechanism being stepped and not a choice the
+/// caller gets to make.  This is the entry point the application and every
+/// harness step the plate through, so every one of them inherits it.
 std::array<double, 3> stepServosOnPlate(const TableKinematics& tk,
                                         const std::array<double, 3>& alpha_rad,
                                         const std::array<double, 3>& cmd_rad,

@@ -350,6 +350,14 @@ struct Sweep {
     /// zero for a ball already in flight, which would drag this to zero and
     /// say nothing.  The one test that reads it asserts `separated == 0` first.
     double min_normal = 1e9;
+
+    /// The worst `|cmd - alpha|` any leg was handed at a frame's start, in rad.
+    ///
+    /// This is the quantity the servo rate limit is a threshold on — it engages
+    /// above `rate_max * tau`, 30 degrees against the shipped servo — so it is
+    /// how a sweep says whether the limit was even in the room.  See
+    /// `kServoRateMax` and #32.
+    double peak_leg_error = 0.0;
 };
 
 // One shove, from the state the loop actually settles into — the ball parked a
@@ -386,7 +394,11 @@ Sweep sweepOneDirection(const ModelEntry& e, const Eigen::MatrixXd& K,
             st.ball.rolling(3) += s.speed * std::sin(theta);
         }
 
+        const std::array<double, 3> was = st.alpha_rad;
         const SimReport frame = stepSim(plate, in, st);
+        for (int i = 0; i < 3; ++i)
+            sw.peak_leg_error =
+                std::max(sw.peak_leg_error, std::abs(frame.cmd_rad[i] - was[i]));
 
         // The plate always has an assembly now.  A stronger statement than
         // "the ball stayed on", and the one #22's fix actually makes.
@@ -497,6 +509,68 @@ void test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance() {
     // Jacobian condition number of 20 also may not slam quite as hard, and
     // the margin the ball is held by is what that buys.
     ASSERT_TRUE(margin > 1.0);
+}
+
+// **What the servo rate limit does to this sweep, and — mostly — what it does
+// not.**  #32 asks for the effect to be STATED under both tunings, so it is
+// measured here rather than asserted in prose somewhere it can rot.
+//
+// The limit is a threshold on leg ERROR, not on ball speed: it engages above
+// `rate_max * tau`, which against the shipped 10.47 rad/s servo and 0.05 s lag
+// is 30.00 degrees.  Over 72 directions at the demo's own 0.26 m/s Nudge, the
+// worst leg error any frame produced is
+//
+//     Nominal      27.30 deg   — 2.7 deg of headroom, the limit never engages
+//     Aggressive   30.26 deg   — one frame past it, out of 187,920 leg-frames
+//
+// So the sweep is unchanged by it, on every number that has ever been asserted
+// about it: nothing separates under either tuning, the normal-force margin is
+// 1.913 m/s^2 Nominal and 1.354 Aggressive with and without the limit, and the
+// peak reach is 31.15 mm and 28.57 mm either way.  The single Aggressive frame
+// that ramps moves the worst leg rate in the sweep from 8.984 rad/s to 8.983.
+//
+// **That is the intended result, not a disappointment.**  Separation at this
+// disturbance is an acceleration phenomenon and this is a rate limit; they bind
+// in different regimes.  What the measurement buys is the knowledge that the
+// limit sits *just* above where the Aggressive preset works, so it is insurance
+// against the saturated recoveries this sweep does not contain rather than a
+// tax on the demo the visitor actually sees.
+void test_the_rate_limit_is_insurance_rather_than_a_tax() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+    const TableParams tp = cascadeMechanism(e.params);
+    // 30.00 degrees exactly, to within the float round-trip the model's tau
+    // slider takes — the same micron-scale tolerance `samePlant` is sized by.
+    const double handover = tp.alpha_rate_max * cascadeServoTau(e.params);
+    ASSERT_NEAR(handover, 30.0 * M_PI / 180.0, 1e-6);
+
+    struct Tuning { const char* name; Eigen::MatrixXd K; double worst_error; };
+    Tuning tunings[] = {
+        {"Nominal", defaultGain(e), 0.4765},
+        {"Aggressive", gainForPreset(e, presetNamed("Aggressive")), 0.5282},
+    };
+
+    for (const Tuning& t : tunings) {
+        double margin = 1e9;
+        double leg_error = 0.0;
+        int separated = 0;
+        for (int i = 0; i < 72; ++i) {
+            const Sweep sw = sweepOneDirection(e, t.K, Disturbance{},
+                                               i * 2.0 * M_PI / 72.0);
+            if (sw.separated) ++separated;
+            margin = std::min(margin, sw.min_normal);
+            leg_error = std::max(leg_error, sw.peak_leg_error);
+        }
+        ASSERT_EQ(separated, 0);
+        ASSERT_TRUE(margin > 1.0);
+        ASSERT_NEAR(leg_error, t.worst_error, 1e-3);
+    }
+
+    // Nominal stays clear of the limit; Aggressive touches it.  Pinned as the
+    // ordering rather than only as two numbers, because it is the ordering
+    // that says which tuning the limit is for.
+    ASSERT_TRUE(tunings[0].worst_error < handover);
+    ASSERT_TRUE(tunings[1].worst_error > handover);
 }
 
 // ---------------------------------------------------------------------------
@@ -771,6 +845,7 @@ int main() {
     test_the_demo_tracks_its_circle();
     test_the_kick_is_rejected_from_every_direction();
     test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance();
+    test_the_rate_limit_is_insurance_rather_than_a_tax();
     test_a_shove_while_tracking_is_rejected_from_every_direction();
     test_the_nudge_buttons_cannot_compose_past_the_bound();
     test_the_aggressive_preset_recovers_from_every_direction();
