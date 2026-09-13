@@ -11,6 +11,7 @@
 #include "setpoint_path.h"
 #include "sim_step.h"
 #include "table_kinematics.h"
+#include "trajectory_controls.h"
 
 #include <Eigen/Core>
 #include <array>
@@ -157,17 +158,29 @@ private:
     bool balance_engaged_ = false;
     bool balance_saturated_ = false;
     bool balance_clipped_ = false;   ///< command was not holdable, pulled back
-    float sp_x_mm_ = 0.0f;  // ball setpoint, plate frame
-    float sp_y_mm_ = 0.0f;
 
-    // --- Trajectory tracking (#24) ---
-    // A moving setpoint.  It writes `sp_x_mm_` / `sp_y_mm_` rather than going
-    // round them, so the control law is untouched and the sliders keep working
-    // as the readout of where the ball is being sent — the same arrangement
-    // the servo sliders have under the balance loop.
-    SetpointPath path_{};
-    float path_radius_mm_ = 120.0f;
-    float path_period_s_ = 10.0f;
+    // --- Trajectory tracking (#24, #28) ---
+    // Where the ball is being sent, and the four controls that change it.  The
+    // setpoint sliders' value is in here too: under a path they are a readout
+    // of what the path is doing and under a held point they are the input, and
+    // deciding which is the object's business rather than this panel's.
+    //
+    // What is left here is ImGui and forwarding.  The rules that used to be
+    // spelled out at the call sites below — the lap floor against the radius
+    // just dragged, the phase re-seeded rather than carried across a shape
+    // change, the setpoint read back from the step under a path — are
+    // `TrajectoryControls`' methods now, and `test_setpoint_path` drives the
+    // same object through the same entry points.
+    //
+    // **What is NOT covered, so that the boundary is written down rather than
+    // discovered:** everything between an ImGui call and one of those methods.
+    // That is the combo's index-to-`PathShape` cast, the mm/metre conversions
+    // either side of each slider, which widgets are disabled under a path, and
+    // the three readouts (speed, fillet, error).  A test would need a GL
+    // context and an ImGui context to reach any of it.  What makes that
+    // acceptable is that none of it holds a rule: every line is a conversion
+    // or a call, and the arithmetic that used to sit between them is gone.
+    TrajectoryControls traj_;
 
     // --- Camera ---
     OrbitCamera camera_;

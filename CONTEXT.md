@@ -1079,8 +1079,9 @@ where the interesting behaviour is, and sweeping an angle would crawl through
 it.
 
 **Position on the path is a phase, and the phase is accumulated.**  `pathPoint`
-and `pathVelocity` take a lap fraction in `[0, 1)`; `plate_view` holds it and
-advances it by `dt / period_s` each step.  It used to be derived from the
+and `pathVelocity` take a lap fraction in `[0, 1)`; it lives in
+`SimState::path_phase` and `stepSim` advances it by `dt / period_s` each frame,
+which is where a fact one frame hands to the next belongs (#30).  It used to be derived from the
 simulation clock as `t / period_s`, which reads as a pure function of time and
 is not one: changing the lap moves that quantity by `t dT / T^2`, and `t` is the
 whole time the demo has been running.  Measured at 100 s, a nudge of the lap
@@ -1165,6 +1166,55 @@ a claim about frame alignment rather than about the controller.  It was 14 mm
 and nearly three times before the corners were filleted — see below.
 
 Decided in [#24](https://github.com/caliburn-engineering/caliburn/issues/24).
+
+### Trajectory controls
+
+The four controls the trajectory panel offers — the shape combo, the size
+slider, the lap slider and the setpoint sliders — and the state they act on,
+in `TrajectoryControls`.  `PlateView` holds one and forwards to it.
+
+**It was extracted because the panel had an invariant and kept it by
+convention.**  The path and the setpoint are one piece of state with one promise
+over it — *the setpoint never jumps* — and every rule that keeps that promise is
+a rule about what happens **between** two of its fields: the lap floor applied
+against the radius just dragged, the phase re-seeded rather than carried across
+a shape change, the setpoint sliders being a readout under a path and the input
+under a held point.  Three rules, spelled out at four call sites in
+`plate_view.cpp`, each of which had to remember to refresh the path's radius
+first.  Two of them had already been got wrong once each, and the second time
+shipped: the shape combo carried its phase and threw the setpoint 169.7 mm to
+the far side of the path, found by driving the browser because the combo handler
+is view code.
+
+So the fields are held together and the rules are the methods that move them.
+What is left in the panel is ImGui plus forwarding, and `test_setpoint_path`
+drives the object the panel drives, through the same entry points.
+
+**The two slider floats are gone with it.**  `path_.radius_m` and
+`path_.period_s` are the one representation of the size and the lap; the panel
+casts to a `float` at the widget and hands the answer straight back.  That is
+what makes the stale-radius skew structural rather than remembered — two fields
+that must agree cannot disagree if there is one field.
+
+**The phase is not in it**, because since #30 it is `SimState`'s and `stepSim`
+advances it.  So this type does not drive the setpoint, the step does, and
+`setShape` takes the phase by reference: re-seeding it is the combo's job,
+owning it is the step's.  Which is why it is `TrajectoryControls` and not
+`TrajectoryDriver`.
+
+**What stays untested, written down rather than discovered:** everything between
+an ImGui call and one of these methods — the combo's index-to-`PathShape` cast,
+the mm/metre conversions either side of each slider, which widgets are disabled
+under a path, and the three readouts.  Reaching any of it needs a GL context and
+an ImGui context.  What makes that acceptable is that none of it holds a rule:
+every line is a conversion or a call, and the arithmetic that used to sit
+between them is gone.
+
+Headless `PlateView` was the other option and was refused: a GL context and an
+ImGui context to pin a handful of assignments, with coverage of a lot of
+unrelated UI arriving alongside.
+
+Decided in [#28](https://github.com/caliburn-engineering/caliburn/issues/28).
 
 ### Fillet
 

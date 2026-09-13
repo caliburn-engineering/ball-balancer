@@ -92,6 +92,17 @@ PlateView::PlateView()
       // and the drawn plate are one object, not two that have to be kept in
       // step.  It is also exactly what every test harness runs against.
     : plate_(defaultTableParams(), kGravity, kHomeLegRad),
+      // How tightly the setpoint may turn its corners, from the plate itself.
+      // Set once because `plate_` is built once: the geometry the visitor sees
+      // never changes under them, and a leg length that did would be a
+      // different plant, which `samePlant` already refuses to run the loop
+      // against.
+      //
+      // Here rather than only inside `stepSim` because the panel asks the path
+      // its own questions — the lap floor, the outline it draws, the phase a
+      // shape change re-seeds from — and a path answering those with sharp
+      // corners while the step drove filleted ones would be two paths.
+      traj_(plate_.feasible(openingPath())),
       plot_state_(kBufSize),
       s_phi_("\xcf\x86", kBufSize),                 // phi
       s_theta_("\xce\xb8", kBufSize),               // theta
@@ -118,19 +129,7 @@ PlateView::PlateView()
     // along it, so the first frame that draws is a frame of the demo working
     // rather than a frame of it starting up.  Both errors are zero here, which
     // is what keeps the legs still — see `attract_mode.h`.
-    // How tightly the setpoint may turn its corners, from the plate itself.
-    // Set once because `plate_` is built once: the geometry the visitor sees
-    // never changes under them, and a leg length that did would be a different
-    // plant, which `samePlant` already refuses to run the loop against.
-    //
-    // Here rather than only inside `stepSim` because the panel asks the path
-    // its own questions — the lap floor, the outline it draws, the phase a
-    // shape change re-seeds from — and a path answering those with sharp
-    // corners while the step drove filleted ones would be two paths.
-    path_ = plate_.feasible(openingPath());
-    path_radius_mm_ = static_cast<float>(path_.radius_m * 1000.0);
-    path_period_s_ = static_cast<float>(path_.period_s);
-    sim_ = simStart(plate_, kHomeLegRad, attractStart(path_));
+    sim_ = simStart(plate_, kHomeLegRad, attractStart(traj_.path()));
 
     plots_ = {
         {"Ball Position [mm]", {&s_bx_, &s_by_}, 0},
@@ -260,8 +259,7 @@ void PlateView::resetAll() {
     balance_saturated_ = false;
     balance_clipped_ = false;
     report_ = SimReport{};
-    sp_x_mm_ = 0.0f;
-    sp_y_mm_ = 0.0f;
+    traj_.centreSetpoint();
     anim_time_ = 0.0f;
     camera_ = defaultCamera();
     plot_state_.clear();
@@ -331,19 +329,17 @@ void PlateView::step(GLFWwindow* window, float dt) {
 
     // --- The setpoint, and who owns it ---
     //
-    // A path writes `sp_x_mm_` / `sp_y_mm_` rather than going round them, so
-    // the sliders keep working as the readout of where the ball is being sent.
-    // A held setpoint is the sliders' own value handed back down.  Which of
-    // the two it is, and the read-then-advance rule that goes with a path, are
-    // both inside the step.
-    if (path_.shape != PathShape::Fixed) {
-        path_.radius_m = path_radius_mm_ * 1e-3;
-        path_.period_s = path_period_s_;
-    }
-    in.path = path_;
-    in.held_setpoint = Eigen::Vector2d(sp_x_mm_ * 1e-3, sp_y_mm_ * 1e-3);
+    // Out through `toInput` and back through `fromReport`, which is the whole
+    // of what this panel does with the trajectory each frame.  A path writes
+    // the setpoint sliders rather than going round them, so they keep working
+    // as the readout of where the ball is being sent; a held setpoint is their
+    // own value handed back down.  Which of the two it is lives in
+    // `TrajectoryControls`, and the read-then-advance rule that goes with a
+    // path lives in the step.
+    traj_.toInput(in);
 
     report_ = stepSim(plate_, in, sim_);
+    traj_.fromReport(report_);
     sim_time_ += dt;
 
     // --- What came back ---
@@ -359,13 +355,6 @@ void PlateView::step(GLFWwindow* window, float dt) {
         balance_clipped_ = report_.clipped;
         for (int i = 0; i < 3; ++i)
             alpha_cmd_deg_[i] = static_cast<float>(report_.cmd_rad[i] / kDeg);
-    }
-
-    // And the setpoint, where a path owns it.  A held setpoint is the
-    // sliders' and is left alone for the same reason.
-    if (path_.shape != PathShape::Fixed) {
-        sp_x_mm_ = static_cast<float>(report_.setpoint(0) * 1000.0);
-        sp_y_mm_ = static_cast<float>(report_.setpoint(1) * 1000.0);
     }
 
     condition_num_ = kinematics().condition_number(sim_.alpha_rad, sim_.pose);
@@ -399,8 +388,9 @@ void PlateView::step(GLFWwindow* window, float dt) {
     push_series(s_bz_,    static_cast<float>((bp(2) - kBallRadius) * 1000), plot_state_);
     // Signed, and in the plate frame the setpoint is already expressed in, so
     // a positive x error means the ball is further along +x than it was told.
-    push_series(s_ex_,    static_cast<float>(bp(0) * 1000) - sp_x_mm_, plot_state_);
-    push_series(s_ey_,    static_cast<float>(bp(1) * 1000) - sp_y_mm_, plot_state_);
+    const Eigen::Vector2d& sp = traj_.setpoint();
+    push_series(s_ex_,    static_cast<float>((bp(0) - sp(0)) * 1000), plot_state_);
+    push_series(s_ey_,    static_cast<float>((bp(1) - sp(1)) * 1000), plot_state_);
     push_series(s_phi_,   static_cast<float>(sim_.pose.phi / kDeg), plot_state_);
     push_series(s_theta_, static_cast<float>(sim_.pose.theta / kDeg), plot_state_);
     push_series(s_a0_,    legDeg(0), plot_state_);
@@ -671,72 +661,68 @@ void PlateView::drawBalanceControls() {
     const char* shapes[] = {"Hold a point", "Circle", "Square", "Triangle"};
     static_assert(IM_ARRAYSIZE(shapes) == static_cast<int>(PathShape::Triangle) + 1,
                   "shapes is index-coupled to PathShape");
-    int shape_idx = static_cast<int>(path_.shape);
+    int shape_idx = static_cast<int>(traj_.path().shape);
     if (ImGui::Combo("Trajectory", &shape_idx, shapes, IM_ARRAYSIZE(shapes))) {
-        path_.shape = static_cast<PathShape>(shape_idx);
-        // The new shape picks up nearest to where the setpoint already is,
-        // rather than at whatever the carried phase means on it.  Phase is not
-        // comparable across shapes — the circle's zero is at +x, a polygon's
-        // first corner is at the top — so carrying it moved the target 170 mm
-        // to the far side of the path and the loop hauled the ball across
-        // after it, into the workspace clip.  See `phaseNearest`.
-        //
-        // From the radius the slider holds, not the one `step` last copied:
-        // the same one-frame skew the lap floor had, and the polygon corners
-        // this reads are a function of it.
-        path_.radius_m = path_radius_mm_ * 1e-3;
-        sim_.path_phase = phaseNearest(
-            path_, Eigen::Vector2d(sp_x_mm_ * 1e-3, sp_y_mm_ * 1e-3));
+        // The phase is the simulation's, so the combo hands it over to be
+        // re-seeded rather than keeping one of its own.  Why it must be
+        // re-seeded at all, and why the lap floor is applied first, are
+        // `TrajectoryControls::setShape`.
+        traj_.setShape(static_cast<PathShape>(shape_idx), sim_.path_phase);
     }
 
-    const bool on_a_path = path_.shape != PathShape::Fixed;
+    const bool on_a_path = traj_.onAPath();
     if (on_a_path) {
         // Size and speed both, because they trade against each other and the
         // interesting settings are at both ends: large and slow makes the
         // shape unmistakable, small and fast makes the tracking lag and the
         // rounded corners unmistakable instead.
-        ImGui::SliderFloat("size [mm]", &path_radius_mm_, 20.0f,
-                           static_cast<float>(kMaxPathRadius * 1000.0), "%.0f");
+        float size_mm = static_cast<float>(traj_.sizeMm());
+        if (ImGui::SliderFloat("size [mm]", &size_mm, 20.0f,
+                               static_cast<float>(kMaxPathRadius * 1000.0), "%.0f"))
+            traj_.setSizeMm(size_mm);
         // The lap slider's floor moves with the size, because what loses the
         // ball is the setpoint's SPEED and a fixed floor would either forbid
         // fast small paths that are safe or allow fast large ones that are not.
-        //
-        // Taken from the size just dragged, not from the one `step` last
-        // copied: the two are the same only until someone moves the slider,
-        // and the frame where they differ is exactly the frame where a
-        // just-enlarged path would keep the smaller path's floor and run at a
-        // speed this bound exists to forbid.
-        path_.radius_m = path_radius_mm_ * 1e-3;
-        const float lap_min = static_cast<float>(minPeriod(path_));
-        ImGui::SliderFloat("lap [s]", &path_period_s_, lap_min, 30.0f, "%.1f");
-        path_period_s_ = static_cast<float>(clampPeriod(path_, path_period_s_));
+        // It is read off the path the size slider has already written to, so
+        // there is no copy of the radius to be a frame behind.
+        float lap_s = static_cast<float>(traj_.lapS());
+        const float lap_min = static_cast<float>(minPeriod(traj_.path()));
+        if (ImGui::SliderFloat("lap [s]", &lap_s, lap_min, 30.0f, "%.1f"))
+            traj_.setLapS(lap_s);
         ImGui::TextDisabled("setpoint speed %.0f mm/s (max %.0f)",
-                            pathLength(path_) / std::max(0.1, path_.period_s) * 1000.0,
+                            pathLength(traj_.path())
+                                / std::max(0.1, traj_.path().period_s) * 1000.0,
                             kMaxSetpointSpeed * 1000.0);
         // What the corners are being rounded by, and why.  It is the most
         // visible thing on the plate at a fast lap, and without a word for it
         // a filleted square reads as a square drawn wrong.  Only where there
         // are corners: a circle would report a fillet of zero, which is a line
         // of text saying nothing.
-        if (pathCorners(path_.shape) > 0)
+        if (pathCorners(traj_.path().shape) > 0)
             ImGui::TextDisabled(
                 "corner fillet %.0f mm (the %.2f m/s\xc2\xb2 the ball can take)",
-                filletRadius(path_) * 1000.0, path_.accel_max);
+                filletRadius(traj_.path()) * 1000.0, traj_.path().accel_max);
     }
 
     // The setpoint sliders stay visible and go read-only under a path, for the
     // same reason the servo sliders do under the loop: a disabled control that
     // keeps moving is the clearest statement of what is driving it.
     ImGui::BeginDisabled(on_a_path);
-    ImGui::SliderFloat("set x [mm]", &sp_x_mm_, -lim, lim, "%.0f");
-    ImGui::SliderFloat("set y [mm]", &sp_y_mm_, -lim, lim, "%.0f");
-    if (ImGui::Button("Centre setpoint")) { sp_x_mm_ = 0.0f; sp_y_mm_ = 0.0f; }
+    float sp_x_mm = static_cast<float>(traj_.setpointXmm());
+    float sp_y_mm = static_cast<float>(traj_.setpointYmm());
+    // Both sliders asked before either answer is used: `||` would skip the
+    // second widget on the frame the first one moved, and a widget that is not
+    // submitted is a widget that disappears.
+    bool dragged = ImGui::SliderFloat("set x [mm]", &sp_x_mm, -lim, lim, "%.0f");
+    dragged = ImGui::SliderFloat("set y [mm]", &sp_y_mm, -lim, lim, "%.0f") || dragged;
+    if (dragged) traj_.setHeldSetpointMm(sp_x_mm, sp_y_mm);
+    if (ImGui::Button("Centre setpoint")) traj_.centreSetpoint();
     ImGui::EndDisabled();
 
     const Eigen::Matrix<double, 6, 1> bp =
         plateFrame(sim_.ball, sim_.motion, kBallRadius);
-    const double err = std::hypot(bp(0) - sp_x_mm_ * 1e-3,
-                                  bp(1) - sp_y_mm_ * 1e-3);
+    const Eigen::Vector2d& sp = traj_.setpoint();
+    const double err = std::hypot(bp(0) - sp(0), bp(1) - sp(1));
     // Both warnings ride on the error line rather than taking lines of their
     // own.  They are independent and they flicker at frame rate, so on their
     // own lines the whole panel below has three resting positions and a slider
@@ -851,9 +837,9 @@ void PlateView::drawMechanism() {
     // plate's surface in the plate's own frame, so it tilts with the plate —
     // it is a target expressed in plate coordinates, and drawing it flat in
     // the world would put it somewhere the ball is not being sent.
-    if (path_.shape != PathShape::Fixed) {
+    if (traj_.onAPath()) {
         Eigen::Matrix<double, 2, Eigen::Dynamic> outline;
-        pathOutline(path_, 64, &outline);
+        pathOutline(traj_.path(), 64, &outline);
         for (int i = 0; i + 1 < outline.cols(); ++i) {
             const Eigen::Vector3d a =
                 tc + R * Eigen::Vector3d(outline(0, i), outline(1, i), 0.001);
@@ -864,7 +850,7 @@ void PlateView::drawMechanism() {
     }
     {
         const Eigen::Vector3d sp =
-            tc + R * Eigen::Vector3d(sp_x_mm_ * 1e-3, sp_y_mm_ * 1e-3, 0.001);
+            tc + R * Eigen::Vector3d(traj_.setpoint()(0), traj_.setpoint()(1), 0.001);
         lr.circle(sp, 0.012, tn, col::setpoint, 20, 2.0f);
         lr.point(sp, col::setpoint, 0.006f, 3.0f);
     }

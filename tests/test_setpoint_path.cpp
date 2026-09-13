@@ -14,6 +14,7 @@
 #include "cascade_fixture.h"
 #include "sim_step.h"
 #include "table_kinematics.h"
+#include "trajectory_controls.h"
 #include "test_helpers.h"
 
 #include <algorithm>
@@ -364,46 +365,47 @@ void test_the_degenerate_cases_behave() {
 //
 // Every test in this file used to evaluate the path at fixed parameters, which
 // is exactly why not one of them saw it.  These change a slider mid-run.
+//
+// **They drive `TrajectoryControls`, which is the object the panel drives.**
+// They used to drive a `Run` harness that re-stated the panel's three rules
+// beside it — the lap floor, the re-seeded phase, the size slider moving the
+// floor with it — which is a test of the harness's copy rather than of the
+// application (#28).  The rules are the object's methods now, and what is left
+// here is a clock.
 
-/// `plate_view`'s own arrangement: a path, an accumulated phase, and the two
-/// sliders applied the way the panel applies them.
-struct Run {
-    SetpointPath path;
-    double phase = 0.0;
+/// Where a frame would have left the setpoint: on the path, at `phase`.
+///
+/// Through `fromReport`, because that is how the setpoint reaches the controls
+/// in the application — the step reports where it drove the setpoint to and the
+/// panel holds the answer.  The tests need it because `setShape` re-seeds from
+/// where the setpoint IS, and that is the whole of what makes a shape change
+/// not jump.
+void frameLeftItAt(TrajectoryControls& tc, double phase) {
+    SimReport r;
+    r.setpoint = pathPoint(tc.path(), phase);
+    r.setpoint_velocity = pathVelocity(tc.path(), phase);
+    tc.fromReport(r);
+}
 
-    void advance(double seconds) {
-        const double dt = 1.0 / 60.0;
-        for (int i = 0; i < static_cast<int>(seconds / dt); ++i)
-            phase = stepPath(path, phase, dt).next_phase;
-    }
-
-    Eigen::Vector2d point() const { return pathPoint(path, phase); }
-    Eigen::Vector2d velocity() const { return pathVelocity(path, phase); }
-
-    /// The lap slider.  Held off the floor by `clampPeriod`, which is the
-    /// panel's own rule rather than a copy of it — see `setpoint_path.h`.
-    void setLap(double period_s) { path.period_s = clampPeriod(path, period_s); }
-
-    /// The size slider — which moves the lap floor with it, and so was the
-    /// second way into the same bug: raising the radius raises the floor,
-    /// which pushes the lap up, which was a change of `period_s`.
-    void setSize(double radius_m) {
-        path.radius_m = radius_m;
-        path.period_s = clampPeriod(path, path.period_s);
-    }
-
-    /// The shape combo.  The new shape picks up nearest to where the setpoint
-    /// already is — `phaseNearest`, the panel's own rule — because phase means
-    /// a different place on each shape.  `accel_max` rides along on the path
-    /// itself, which is what the panel does: it is the plate's, and the plate
-    /// does not change when a combo does.
-    void setShape(PathShape s) {
-        const Eigen::Vector2d was = point();
-        path.shape = s;
-        path.period_s = clampPeriod(path, path.period_s);
-        phase = phaseNearest(path, was);
-    }
-};
+/// Run the lap for `seconds` at the application's own frame rate.
+///
+/// The phase is walked with `advancePhase`, which is the function `stepPath`
+/// itself walks it with at the same `dt`, rather than with a second expression
+/// for the same thing.  Nothing else is here: every rule these tests are about
+/// is a method on `TrajectoryControls` or a function in `setpoint_path.h`, and
+/// what is left is a clock.
+///
+/// The plate is deliberately absent, because these tests choose `accel_max` —
+/// a sharp-cornered path is where "the setpoint does not move" is EXACT, and a
+/// filleted one changes shape when the lap changes.  The section after this one
+/// drives `stepSim` on the shipped plate instead, which is where the wiring
+/// claims belong.
+void advance(TrajectoryControls& tc, double& phase, double seconds) {
+    const double dt = 1.0 / 60.0;
+    for (int i = 0; i < static_cast<int>(seconds / dt); ++i)
+        phase = advancePhase(phase, dt, tc.path().period_s);
+    frameLeftItAt(tc, phase);
+}
 
 // The lap slider changes the RATE and nothing else.  Not approximately —
 // exactly: the phase is a number the slider does not touch.
@@ -413,19 +415,18 @@ void test_changing_the_lap_leaves_the_setpoint_where_it_is() {
         // The old failure was proportional to `t`, so a test that only ever
         // ran for a second would have passed against the bug.
         for (double run_s : {0.5, 10.0, 100.0, 1000.0}) {
-            Run r;
-            r.path = shape(s, 0.12, 10.0);
-            r.advance(run_s);
+            TrajectoryControls tc(shape(s, 0.12, 10.0));
+            double phase = 0.0;
+            advance(tc, phase, run_s);
 
-            const Eigen::Vector2d before = r.point();
-            r.setLap(9.5);
-            const Eigen::Vector2d after = r.point();
+            const Eigen::Vector2d before = pathPoint(tc.path(), phase);
+            tc.setLapS(9.5);
+            const Eigen::Vector2d after = pathPoint(tc.path(), phase);
             ASSERT_NEAR((after - before).norm(), 0.0, 1e-15);
 
             // And again the other way, and by a lot rather than a nudge.
-            const Eigen::Vector2d before_2 = r.point();
-            r.setLap(30.0);
-            ASSERT_NEAR((r.point() - before_2).norm(), 0.0, 1e-15);
+            tc.setLapS(30.0);
+            ASSERT_NEAR((pathPoint(tc.path(), phase) - after).norm(), 0.0, 1e-15);
         }
     }
 }
@@ -437,14 +438,14 @@ void test_the_reference_velocity_steps_on_a_lap_change() {
     // Every shape: the polygons' velocity is just as period-dependent as the
     // circle's, and the position tests beside this one sweep all three.
     for (PathShape s : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
-        Run r;
-        r.path = shape(s, 0.12, 10.0);
-        r.advance(100.0);
+        TrajectoryControls tc(shape(s, 0.12, 10.0));
+        double phase = 0.0;
+        advance(tc, phase, 100.0);
 
-        const Eigen::Vector2d before = r.velocity();
-        r.setLap(5.0);                      // above every shape's floor at 120 mm
-        const Eigen::Vector2d after = r.velocity();
-        ASSERT_NEAR(r.path.period_s, 5.0, 1e-12);
+        const Eigen::Vector2d before = pathVelocity(tc.path(), phase);
+        tc.setLapS(5.0);                    // above every shape's floor at 120 mm
+        const Eigen::Vector2d after = pathVelocity(tc.path(), phase);
+        ASSERT_NEAR(tc.lapS(), 5.0, 1e-12);
 
         // Same direction — the setpoint has not turned, it has sped up.
         ASSERT_NEAR(before.normalized().dot(after.normalized()), 1.0, 1e-12);
@@ -460,26 +461,56 @@ void test_the_reference_velocity_steps_on_a_lap_change() {
 void test_changing_the_size_moves_the_setpoint_radially_only() {
     for (PathShape s : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
         for (double run_s : {0.5, 100.0, 1000.0}) {
-            Run r;
-            r.path = shape(s, 0.02, 10.0);
-            r.setLap(minPeriod(r.path));          // sitting on the floor
-            r.advance(run_s);
+            TrajectoryControls tc(shape(s, 0.02, 10.0));
+            tc.setLapS(minPeriod(tc.path()));     // sitting on the floor
+            double phase = 0.0;
+            advance(tc, phase, run_s);
 
-            const Eigen::Vector2d before = r.point();
-            const double lap_before = r.path.period_s;
+            const Eigen::Vector2d before = pathPoint(tc.path(), phase);
+            const double lap_before = tc.lapS();
 
-            r.setSize(kMaxPathRadius);            // 20 mm -> 180 mm, floor moves
-            const Eigen::Vector2d after = r.point();
+            tc.setSizeMm(kMaxPathRadius * 1000.0);   // 20 -> 180 mm, floor moves
+            const Eigen::Vector2d after = pathPoint(tc.path(), phase);
 
             // The floor really did move, or this test is not exercising the
             // indirect route it exists for.
-            ASSERT_TRUE(r.path.period_s > lap_before);
+            ASSERT_TRUE(tc.lapS() > lap_before);
 
             // Same ray from the centre, and the growth is the ratio asked for.
             ASSERT_TRUE(before.norm() > 1e-9 && after.norm() > 1e-9);
             ASSERT_NEAR(before.normalized().dot(after.normalized()), 1.0, 1e-12);
             ASSERT_NEAR(after.norm() / before.norm(), kMaxPathRadius / 0.02, 1e-9);
         }
+    }
+}
+
+// And the lap the size slider leaves behind is the floor of the path it just
+// made, not of the one it replaced.  **This is the stale-radius skew, asserted
+// rather than argued**: the two lines inside `setSizeMm` are in one order and
+// not the other, and reversing them fails here.
+//
+// It is measurable because the floor moves so far.  Every 20 mm shape sits at
+// the two-second minimum; at 180 mm the floors are 4.52 s for the circle, 3.86
+// for the square and 3.23 for the triangle.  Left at the small path's floor,
+// the same shapes run their setpoint at 566, 482 and 403 mm/s against a 250
+// mm/s cap — which is the bound that keeps the ball on the plate at all.
+void test_growing_the_path_raises_the_lap_to_the_new_floor() {
+    for (PathShape s : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
+        TrajectoryControls tc(shape(s, 0.02, 10.0, kSomeAccel));
+        tc.setLapS(minPeriod(tc.path()));
+        const double small_floor = tc.lapS();
+
+        tc.setSizeMm(kMaxPathRadius * 1000.0);
+
+        // The floor of the path it now HAS, to the last bit.
+        ASSERT_NEAR(tc.lapS(), minPeriod(tc.path()), 1e-15);
+        ASSERT_TRUE(tc.lapS() > small_floor + 1.0);
+
+        // And what the other order would have left: the big path at the small
+        // path's floor, which is 1.6 to 2.3 times over the cap the bound
+        // exists to hold it under.
+        ASSERT_TRUE(pathLength(tc.path()) / small_floor > 1.6 * kMaxSetpointSpeed);
+        ASSERT_TRUE(pathLength(tc.path()) / tc.lapS() <= kMaxSetpointSpeed + 1e-12);
     }
 }
 
@@ -496,14 +527,13 @@ void test_changing_the_size_moves_the_setpoint_radially_only() {
 void test_the_size_slider_barely_rotates_a_filleted_setpoint() {
     for (PathShape s : {PathShape::Square, PathShape::Triangle}) {
         for (int i = 0; i < 200; ++i) {
-            Run r;
-            r.path = shape(s, 0.02, 10.0, kSomeAccel);
-            r.setLap(minPeriod(r.path));
-            r.phase = i / 200.0;
+            TrajectoryControls tc(shape(s, 0.02, 10.0, kSomeAccel));
+            tc.setLapS(minPeriod(tc.path()));
+            const double phase = i / 200.0;
 
-            const Eigen::Vector2d before = r.point();
-            r.setSize(kMaxPathRadius);
-            const Eigen::Vector2d after = r.point();
+            const Eigen::Vector2d before = pathPoint(tc.path(), phase);
+            tc.setSizeMm(kMaxPathRadius * 1000.0);
+            const Eigen::Vector2d after = pathPoint(tc.path(), phase);
 
             ASSERT_TRUE(before.norm() > 1e-9 && after.norm() > 1e-9);
             const double cos_between =
@@ -520,15 +550,15 @@ void test_the_size_slider_barely_rotates_a_filleted_setpoint() {
 // And the rate the phase advances at is the lap time, from the moment the
 // slider moved — which is the whole of what the slider is entitled to do.
 void test_a_lap_change_takes_effect_from_that_moment() {
-    Run r;
-    r.path = shape(PathShape::Circle, 0.12, 10.0);
-    r.advance(100.0);
-    const double at_change = r.phase;
+    TrajectoryControls tc(shape(PathShape::Circle, 0.12, 10.0));
+    double phase = 0.0;
+    advance(tc, phase, 100.0);
+    const double at_change = phase;
 
-    r.setLap(5.0);
-    r.advance(1.0);
+    tc.setLapS(5.0);
+    advance(tc, phase, 1.0);
     // One second at a five-second lap is a fifth of a lap, not a tenth.
-    double moved = r.phase - at_change;
+    double moved = phase - at_change;
     if (moved < 0.0) moved += 1.0;          // the lap wrapped in between
     ASSERT_NEAR(moved, 0.2, 1e-9);
 }
@@ -546,13 +576,13 @@ void test_changing_the_shape_picks_up_where_the_setpoint_is() {
     for (PathShape from : all) {
         for (PathShape to : all) {
             for (int i = 0; i < 64; ++i) {
-                Run r;
-                r.path = shape(from, 0.12, 10.0);
-                r.phase = i / 64.0;
+                TrajectoryControls tc(shape(from, 0.12, 10.0));
+                double phase = i / 64.0;
+                frameLeftItAt(tc, phase);
 
-                const Eigen::Vector2d before = r.point();
-                r.setShape(to);
-                const Eigen::Vector2d after = r.point();
+                const Eigen::Vector2d before = tc.setpoint();
+                tc.setShape(to, phase);
+                const Eigen::Vector2d after = pathPoint(tc.path(), phase);
                 worst = std::max(worst, (after - before).norm());
 
                 // Switching to the SAME shape is exactly a no-op, at every
@@ -692,6 +722,214 @@ void test_the_outline_draws_the_path_the_setpoint_runs() {
         }
         ASSERT_TRUE(worst > 0.005);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The controls, through the application's own frame (#28)
+// ---------------------------------------------------------------------------
+//
+// Everything above drives `TrajectoryControls` and reads the path back.  That
+// is the panel's object, but it is not yet the panel's FRAME: the phase lives
+// in `SimState` and `stepSim` advances it, so a test that never runs a step
+// cannot see the two wired to each other.
+//
+// **That gap is what this ticket is about.**  Both of the last two defects were
+// a well-tested rule called from a place nothing tested — the review of #24
+// round two said in as many words that `plate_view.cpp` could go back to
+// deriving the phase from the clock and every test would still pass, and round
+// three then shipped a shape change that threw the target 169.7 mm because the
+// combo handler was view code.  So these run frames.
+//
+// The plate is the shipped one, which means `accel_max` is the real 1.888
+// m/s^2 rather than a number this file chose.  The setpoint tests above cannot
+// use it — a filleted path changes shape when the lap changes, so "the setpoint
+// does not move" stops being exact — and the circle is the way through: it has
+// no corners, so it is the one shape whose geometry the fillet does not touch.
+
+/// The shipped cascade's parameters — the preset the application opens on.
+const std::vector<PhysicalParam>& cascadeParams() {
+    static const std::vector<ModelEntry> models = getBuiltinModels();
+    static const std::vector<PhysicalParam> params = cascadeModel(models).params;
+    return params;
+}
+
+/// The three objects `PlateView` holds, and the two calls it makes either side
+/// of `stepSim`.
+///
+/// It carries no rule of its own — not the read-then-advance order, not the lap
+/// floor, not the re-seed.  Those are `stepSim`'s and `TrajectoryControls`'.
+/// What it is for is that they are wired to one another, which is the one thing
+/// neither a test of the path arithmetic nor a test of the controls can see.
+///
+/// No gain and no ball.  What is being measured is where the setpoint went, and
+/// nothing in the setpoint stage depends on who is driving the legs; a ball
+/// nobody simulates cannot roll off partway through and leave the rest of a
+/// hundred-second run measuring an empty plate.  `test_trajectory` is where the
+/// ball's side of this is pinned.
+struct Panel {
+    SimPlate plate;
+    TrajectoryControls traj;
+    SimState sim;
+    SimInput in;
+
+    explicit Panel(const SetpointPath& opening)
+        : plate(cascadePlate(cascadeParams())),
+          traj(plate.feasible(opening)),
+          sim(simStart(plate, cascadeDesign(cascadeParams()).home_leg_rad)) {
+        in.design = cascadeDesign(cascadeParams());
+        in.closed_loop = false;
+        in.ball_enabled = false;
+    }
+
+    /// One frame, exactly as `PlateView::step` runs it.
+    Eigen::Vector2d step() {
+        traj.toInput(in);
+        const SimReport r = stepSim(plate, in, sim);
+        traj.fromReport(r);
+        return r.setpoint;
+    }
+
+    void run(double seconds) {
+        for (int i = 0; i < static_cast<int>(seconds / in.dt); ++i) step();
+    }
+};
+
+// The frame drives the path the panel is holding, and hands the answer back to
+// it.  Both halves, because each can be broken on its own: a panel whose path
+// is not the one being run draws an outline the ball is not chasing, and a
+// panel that does not read the setpoint back shows the visitor a stale target
+// and re-seeds the next shape change from it.
+void test_a_frame_drives_the_panel_s_own_path_and_hands_it_back() {
+    Panel p(shape(PathShape::Circle, 0.12, 10.0));
+
+    // The fillet the step will stamp is the fillet the panel already holds, so
+    // the outline it draws and the lap floor it offers are about the path that
+    // is actually being run.
+    ASSERT_NEAR(p.traj.path().accel_max, p.plate.maxBallAccel(), 1e-15);
+
+    const double phase_before = p.sim.path_phase;
+    const Eigen::Vector2d was = p.traj.setpoint();
+    const Eigen::Vector2d drove = p.step();
+
+    // Where the step drove the setpoint is where the panel's own path says it
+    // should be, at the phase the frame opened on — read then advance.
+    ASSERT_NEAR((drove - pathPoint(p.traj.path(), phase_before)).norm(), 0.0, 1e-15);
+    ASSERT_TRUE(p.sim.path_phase > phase_before);
+    // And the panel is holding it.  It started at the centre, so this also says
+    // the frame moved it at all.
+    ASSERT_NEAR((p.traj.setpoint() - drove).norm(), 0.0, 1e-15);
+    ASSERT_TRUE((p.traj.setpoint() - was).norm() > 0.1);
+}
+
+// A held setpoint is the visitor's, and a frame does not touch it — the other
+// half of the same wiring.  Drag it, run a minute, find it where it was left.
+void test_a_held_setpoint_is_the_visitor_s_and_a_frame_leaves_it_alone() {
+    Panel p{SetpointPath{}};                 // PathShape::Fixed
+    p.traj.setHeldSetpointMm(40.0, -25.0);
+
+    const Eigen::Vector2d held = p.traj.setpoint();
+    for (int i = 0; i < 3600; ++i)
+        ASSERT_NEAR((p.step() - held).norm(), 0.0, 1e-15);
+    ASSERT_NEAR((p.traj.setpoint() - held).norm(), 0.0, 1e-15);
+    // And the lap it is not running has not moved under it, so choosing a shape
+    // resumes where the phase was left rather than wherever the clock got to.
+    ASSERT_NEAR(p.sim.path_phase, 0.0, 1e-15);
+}
+
+// **Criterion: deriving the phase from absolute time again fails a test.**
+//
+// The phase used to be `t / period_s`.  Changing the lap moves that quantity by
+// `t dT / T^2`, and `t` is the whole time the demo has been running — measured
+// at 100 s, a nudge from 10.0 to 9.5 s threw the setpoint 170 degrees round the
+// path.  `test_changing_the_lap_leaves_the_setpoint_where_it_is` says the rule;
+// this says the application obeys it, which is the part that was untested.
+//
+// **Where the revert would now have to be made, stated so the attribution is
+// not overclaimed.**  Since #30 the phase is `stepSim`'s, so what goes red here
+// is the step — not this ticket's seam.  The panel-side half of the original
+// defect is gone by construction rather than by test: `PlateView` holds no
+// phase and reads no clock for one, so there is nothing left in it to derive a
+// phase from.  The criterion is kept because the property is the one the review
+// of #24 round two said was reachable from `plate_view.cpp` with every test
+// still passing; what has changed is which file it is reachable from.
+void test_the_lap_slider_does_not_move_the_setpoint_through_the_frame() {
+    Panel p(shape(PathShape::Circle, 0.12, 10.0));
+    p.run(100.0);
+
+    const Eigen::Vector2d before = p.traj.setpoint();
+    p.traj.setLapS(9.5);
+    const Eigen::Vector2d after = p.step();
+
+    // One frame's worth of travel and no more.  At 75 mm/s that is 1.3 mm; the
+    // defect was 238 mm on this path, so nothing here turns on the bound.
+    ASSERT_TRUE((after - before).norm() < 0.002);
+
+    // Said the other way, so that the margin is not the whole of the claim:
+    // the setpoint is nowhere near where the clock would have put it.
+    const Eigen::Vector2d by_the_clock = pathPoint(p.traj.path(), 100.0 / 9.5);
+    ASSERT_TRUE((after - by_the_clock).norm() > 0.1);
+}
+
+// **Criterion: carrying the phase across a shape change again fails a test.**
+//
+// The instance that reached a user.  The combo is view code, so nothing could
+// see it; `setShape` is not, and this drives it through the same frame the
+// panel does.
+void test_a_shape_change_through_the_frame_does_not_throw_the_setpoint() {
+    for (PathShape to : {PathShape::Square, PathShape::Triangle, PathShape::Circle}) {
+        Panel p(shape(PathShape::Circle, 0.12, 10.0));
+        p.run(37.0);                          // no particular phase
+
+        const Eigen::Vector2d before = p.traj.setpoint();
+        const double carried = p.sim.path_phase;
+        p.traj.setShape(to, p.sim.path_phase);
+        const Eigen::Vector2d after = p.step();
+
+        // At most the two shapes are apart, plus the frame's own travel: 35 mm
+        // to the square, 60 mm to the triangle, and nothing at all back to the
+        // circle it is already on.
+        ASSERT_TRUE((after - before).norm() < 0.062);
+        if (to == PathShape::Circle)
+            ASSERT_TRUE((after - before).norm() < 0.002);
+
+        // And what carrying the phase would have done instead, on the path the
+        // step is now running: the far side of it.  At the phase 37 seconds
+        // leaves, re-seeding moves the target 23 mm to the square and 54 mm to
+        // the triangle, against 161 mm and 150 mm carried.
+        if (to != PathShape::Circle) {
+            const Eigen::Vector2d kept = pathPoint(p.traj.path(), carried);
+            ASSERT_TRUE((kept - before).norm() > 0.14);
+            ASSERT_TRUE((kept - before).norm() > 2.5 * (after - before).norm());
+        }
+    }
+}
+
+// **Criterion: applying the lap floor against a stale radius again fails a
+// test** — through the frame, where the consequence is a speed rather than a
+// number.  The size slider is dragged to the maximum on a path already at its
+// floor, and what comes out has to be a setpoint the cap permits, measured by
+// how far it actually travels in a frame rather than by asking the path.
+void test_growing_the_path_mid_run_keeps_the_setpoint_under_the_cap() {
+    Panel p(shape(PathShape::Circle, 0.02, 10.0));
+    p.traj.setLapS(minPeriod(p.traj.path()));
+    p.run(5.0);
+
+    p.traj.setSizeMm(kMaxPathRadius * 1000.0);
+
+    // A lap of the new path, checked frame by frame.  The first frame after the
+    // drag is skipped: the setpoint slides outward to the bigger path on it,
+    // which is the size slider doing its job and not the speed of the lap.
+    Eigen::Vector2d last = p.step();
+    double fastest = 0.0;
+    for (int i = 0; i < static_cast<int>(p.traj.lapS() / p.in.dt); ++i) {
+        const Eigen::Vector2d now = p.step();
+        fastest = std::max(fastest, (now - last).norm() / p.in.dt);
+        last = now;
+    }
+    ASSERT_TRUE(fastest <= kMaxSetpointSpeed + 1e-6);
+    // And it is running near the cap rather than crawling, or the bound would
+    // not be the thing this test is about.
+    ASSERT_TRUE(fastest > 0.9 * kMaxSetpointSpeed);
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +1124,7 @@ int main() {
     test_changing_the_lap_leaves_the_setpoint_where_it_is();
     test_the_reference_velocity_steps_on_a_lap_change();
     test_changing_the_size_moves_the_setpoint_radially_only();
+    test_growing_the_path_raises_the_lap_to_the_new_floor();
     test_the_size_slider_barely_rotates_a_filleted_setpoint();
     test_a_lap_change_takes_effect_from_that_moment();
     test_changing_the_shape_picks_up_where_the_setpoint_is();
@@ -894,6 +1133,11 @@ int main() {
     test_the_centre_has_no_nearest_phase_and_says_so();
     test_the_outline_is_drawable();
     test_the_outline_draws_the_path_the_setpoint_runs();
+    test_a_frame_drives_the_panel_s_own_path_and_hands_it_back();
+    test_a_held_setpoint_is_the_visitor_s_and_a_frame_leaves_it_alone();
+    test_the_lap_slider_does_not_move_the_setpoint_through_the_frame();
+    test_a_shape_change_through_the_frame_does_not_throw_the_setpoint();
+    test_growing_the_path_mid_run_keeps_the_setpoint_under_the_cap();
     test_a_max_is_the_ball_s_own_acceleration_at_the_swept_tilt();
     test_the_swept_tilt_is_the_last_one_that_holds();
     test_on_the_shipped_plate_it_is_the_travel_that_binds();
