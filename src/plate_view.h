@@ -250,7 +250,15 @@ private:
     bool ball_enabled_ = true;
     bool ball_on_plate_ = true;
     bool ball_auto_reset_ = true;
-    float ball_nudge_ = 0.15f;  // [m/s]
+    /// [m/s], per axis.  **Derived from the bound rather than written as a
+    /// literal**, because it was one and the literal went stale: it read 0.15
+    /// while the slider's ceiling came down to `kMaxNudgePerAxis` = 0.141 with
+    /// #23's bounce, so the value the buttons opened on was one the slider
+    /// could no longer be dragged to and the pair composed to 0.212 m/s —
+    /// past the 0.20 the whole recovery envelope was measured at.  Three
+    /// quarters of the ceiling keeps the opening shove a firm one without
+    /// putting the demo on its own limit.
+    float ball_nudge_ = static_cast<float>(0.75 * kMaxNudgePerAxis);
 
     // --- Plots ---
     PlotState plot_state_;

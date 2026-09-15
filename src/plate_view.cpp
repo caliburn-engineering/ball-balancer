@@ -428,8 +428,11 @@ void PlateView::drawControls() {
 
     // Exactly one contact line, every frame.  The `else` is not clutter: it is
     // what stops the panel below moving when the ball settles.  The flash
-    // exists because a separation lasts a handful of frames and would
-    // otherwise be a line of text nobody is quick enough to read.
+    // exists because a separation used to last a handful of frames and would
+    // otherwise be a line of text nobody is quick enough to read — since #23
+    // gave the landing a coefficient of restitution the bounce train runs for
+    // about a second, so the AIRBORNE line is now readable on its own and the
+    // flash is what carries the tail of a short hop.
     if (!ball_on_plate_) {
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
                            "the ball has left the plate");
