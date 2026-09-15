@@ -6,6 +6,7 @@
 #include "auto_balance.h"
 #include "ball_sim.h"
 #include "comparison_panel.h"
+#include "loss_cause.h"
 #include "plot_panel.h"
 #include "renderer.h"
 #include "setpoint_path.h"
@@ -91,6 +92,20 @@ private:
     void drawMechanism();
     void resetAll();
     void resetBall();
+
+    /// Put the ball back in play and take down what was said about the last
+    /// loss.  Every route that gives the visitor a ball again goes through
+    /// here — Reset Ball, Displace, and a full reset — because a banner naming
+    /// a cause for a ball that is now rolling happily is worse than no banner.
+    void clearLoss();
+
+    /// Stop the world on the frame the ball went, and record why.
+    ///
+    /// A loss is a moment, not a blink.  It is also the one thing in this demo
+    /// that a visitor cannot ask to see again — the ball is gone — so the
+    /// frame it happened on is worth freezing rather than scrolling off the
+    /// end of a 10 s plot window while they are still reading the banner.
+    void recordLoss();
 
     /// Command all three legs to one angle.  A command, not a teleport: the
     /// Home/Low/High buttons ask, and the legs arrive one lag later like every
@@ -249,7 +264,41 @@ private:
     float airborne_flash_s_ = 0.0f;  ///< keeps a brief hop legible in the panel
     bool ball_enabled_ = true;
     bool ball_on_plate_ = true;
-    bool ball_auto_reset_ = true;
+
+    /// The escape hatch, and it defaults OFF now.
+    ///
+    /// It used to default on, and what that amounted to was the demo's most
+    /// informative moment rendering as the ball blinking back to the middle:
+    /// no banner, no marker, no cause.  #22's failure mode exactly — the demo
+    /// looked fine and was not.  On, it is still the old behaviour and still
+    /// worth having: somebody watching the plate rather than the panel wants
+    /// the ball put back, not a modal.  The marker is still placed either way,
+    /// so the record survives even when nobody was asked to read it.
+    bool ball_auto_reset_ = false;
+
+    // --- The lost ball ---
+    // What was true on the frame the ball crossed the rim, and the one cause
+    // that comes out of it.  Held rather than recomputed because the frame is
+    // gone: the simulation is stopped, and by the time the banner is drawn the
+    // step that could answer has not run for some seconds.
+    //
+    // **Both are meaningful only while `ball_on_plate_` is false**, which is the
+    // single authority on whether there is a loss to describe — `loopDriving`
+    // already reads it as one.  `RolledOff` is a real cause rather than a "no
+    // loss" sentinel, so nothing may infer from these two that a loss happened.
+    LossFlags loss_flags_{};
+    LossCause loss_cause_ = LossCause::RolledOff;
+
+    /// Which plot the loss marker's annotation goes on.  Resolved once, in the
+    /// constructor, from the series rather than from the title — see there.
+    int loss_marker_plot_ = 0;
+
+    /// Whether the pause on screen is this class's doing or the visitor's.
+    ///
+    /// Both write `plot_state_.paused`, and only one of them should be undone
+    /// by Reset Ball: a visitor who pressed Pause to read a trace and then put
+    /// the ball back has not asked for the plots to start scrolling again.
+    bool paused_by_loss_ = false;
     /// [m/s], per axis.  **Derived from the bound rather than written as a
     /// literal**, because it was one and the literal went stale: it read 0.15
     /// while the slider's ceiling came down to `kMaxNudgePerAxis` = 0.141 with

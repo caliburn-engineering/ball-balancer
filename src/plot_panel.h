@@ -21,12 +21,30 @@ struct TimeSeries {
     }
 };
 
-/// A persistent marker placed by clicking on a plot
+/// A persistent marker: placed by clicking on a plot, or by the simulation
+/// when something happened that is worth being able to look back at.
 struct PlotMarker {
     double time;
-    int source_plot;                // Index of the plot where click happened
+    int source_plot;                // Index of the plot the marker was placed on
     std::vector<float> values;      // Values at marker time for the source plot's series
     std::vector<std::string> labels; // Series labels
+
+    /// Why this marker is here, when something other than a click put it there.
+    ///
+    /// Everything up to the first BLANK LINE is painted on the plot as an
+    /// annotation, whether the reader wants it or not, so it has to be short —
+    /// what happened and the evidence, a couple of labels' worth.  What follows
+    /// the blank line is hover-only, where there is room for a sentence.
+    ///
+    /// **The split is where it is because a phone has no hover.**  Putting the
+    /// evidence behind one would mean the full picture survives for a reader
+    /// with a mouse and for nobody else, which is not what "survives for anyone
+    /// who looks" means.  So the annotation carries what a reader must be able
+    /// to check, and the hover carries what merely helps.
+    ///
+    /// Empty for a marker the visitor placed themselves, which needs no
+    /// explaining to the person who placed it.
+    std::string note;
 };
 
 /// Shared time buffer + cursor state across all time-series plots
@@ -141,6 +159,15 @@ inline float interpolate_at_time(const TimeSeries& s, const PlotState& state, do
     if (best < 0) return 0;
     return s.data[best];
 }
+
+/// Put a marker at time `t` on plot `pi`, capturing that plot's series values.
+///
+/// The one place a marker is constructed.  The click path and the simulation
+/// both go through it, because a marker built at a second site is a marker that
+/// can be built with its labels and its values out of step — and a marker is
+/// read long after the frame that made it, so nothing would ever say so.
+void place_marker(PlotState& state, const std::vector<PlotConfig>& plots,
+                  int pi, double t, std::string note = {});
 
 /// Draw the plots panel with all time-series invariants
 /// Returns true if any plot was clicked (marker placed)

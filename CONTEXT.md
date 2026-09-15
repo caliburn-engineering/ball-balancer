@@ -1206,6 +1206,74 @@ Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23),
 against the reasoning recorded as D8, D9 and D10 in
 `docs/plans/2026-09-09-bouncing-ball-control-decisions.md`.
 
+### Losing the ball, and saying so
+
+A lost ball used to be a silent teleport.  `ball_auto_reset_` defaulted **true**
+and `resetBall()` put the ball back at the centre with no banner, no marker and
+no cause — so the demo's most informative moment, the loop losing the ball,
+rendered as the ball blinking back to the middle.  That is
+[#22](https://github.com/caliburn-engineering/caliburn/issues/22)'s failure mode
+exactly: the demo looked fine and was not.
+
+**Auto-reset now defaults off**, and with it off three things happen instead:
+
+- **The simulation stops** on the frame the ball crossed the rim.  A loss is a
+  moment, not a blink, and it is the one thing in this demo a visitor cannot ask
+  to see again.  There is one pause rather than two that can disagree:
+  `plot_state_.paused` IS the simulation's pause — `PlateView::step` returns on
+  it — and the plot panel's own Pause button lifts it as it always did.
+  `paused_by_loss_` only records who set it, so Reset Ball lifts this class's
+  pause and leaves the visitor's alone.
+- **A banner names one cause**, on the contact line that was already being drawn
+  every frame — see *Status badges, and why nothing gets its own line*.
+- **A marker goes on the plots at that instant**, annotating Ball Position and
+  drawing its line across every plot, so the leg commands, the ball height and
+  the condition number can all be read at the frame it happened on.
+
+The checkbox is still there and still does what it used to.  The marker is
+placed either way, so the record survives the case where nobody is asked to read
+it — which is the case it is worth most in.
+
+#### The precedence
+
+One cause, by an order derived from **causality** rather than ranked by
+severity.  Each entry is upstream of the next, so naming the first that is set
+is naming the thing that made the rest possible:
+
+1. **rates untrustworthy** — the arithmetic cannot be believed at all
+2. **workspace-clipped** — the mechanism refused the command
+3. **separated** — the plate left the ball
+4. **saturated** — the servo ran out of travel
+5. **rolled off** — nothing failed; the ball simply went too far
+
+It lives in `lossCause` as a pure function of four booleans read at the crossing
+frame, with no lookback window.  Both of those are decisions with measurements
+behind them, and the measurements are in `lossCause`'s own comment rather than
+here: **why the flags at the crossing frame are enough**, and **why all five
+entries stay when the closed loop inside the offered envelope raises only two of
+them**.  `test_loss_cause` pins the rule over all sixteen inputs, the two scarce
+causes' reachability, and the three branches the application actually reaches.
+
+The pure function is what makes that possible.  Measured, the loop cannot raise
+entry 1 at anything the Nudge buttons compose, so a test that drove only the
+demo would leave the top of the precedence unpinned and nothing would say so.
+
+#### Where the evidence goes, and why not behind a hover
+
+The banner is a label and the plot annotation is a label plus the raw flags; the
+sentence explaining what the cause means is the only part behind a hover.
+
+That split is not a matter of tidiness.  **A phone has no hover.**  Putting the
+evidence behind one would mean the full picture survives for a reader with a
+mouse and for nobody else, which is not what "survives for anyone who looks"
+means.  So `PlotMarker::note` splits at a blank line: everything before it is
+painted on the plot, everything after is hover-only.  The rule for deciding
+which side a thing goes on is whether a reader has to be able to CHECK it.
+
+Decided in [#33](https://github.com/caliburn-engineering/caliburn/issues/33),
+against D11, D13 and D14 of
+`docs/plans/2026-09-09-bouncing-ball-control-decisions.md`.
+
 ### Trajectory tracking
 
 A moving setpoint: circle, square, triangle, or the fixed point the loop has

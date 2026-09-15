@@ -1,10 +1,50 @@
 #include "plot_panel.h"
+
 #include <cstdio>
+#include <string>
+#include <utility>
 
 static constexpr float MIN_PLOT_HEIGHT = 120.0f;
 static constexpr float Y_MARGIN = 0.05f;  // 5% margin on Y-limits
 static const ImVec4 CURSOR_COLOR  = ImVec4(1.0f, 1.0f, 1.0f, 0.5f);
 static const ImVec4 MARKER_COLOR  = ImVec4(1.0f, 0.8f, 0.2f, 0.7f);
+// How near the cursor has to be, in PIXELS, for a marker's note to appear in
+// the hover.
+//
+// Pixels rather than seconds or a fraction of the time window, because "near
+// the marker" is a judgement the reader makes with their eyes and their mouse.
+// Measured in the browser: this panel docks to about 270 px of plot width, and
+// a 10 s window there is 23 px per second — so a tolerance of 2% of the window
+// was +/-4 px, which is narrower than the marker's own line is easy to aim at,
+// and it got narrower still every time somebody zoomed out.
+static constexpr float MARKER_HOVER_PIXELS = 10.0f;
+
+// The most markers kept, oldest dropped first.
+//
+// Markers used to be one-per-click, so the list was bounded by how long
+// somebody was willing to keep clicking.  A lost ball places one too, and with
+// Auto-reset on nobody is clicking: a plate left tilted loses the ball, has it
+// put back, and loses it again, for as long as the tab is open.  A cap is what
+// stops an unattended demo growing a list forever, and dropping the oldest is
+// right for both producers — the interesting marker is the recent one.
+static constexpr size_t MAX_MARKERS = 64;
+
+void place_marker(PlotState& state, const std::vector<PlotConfig>& plots,
+                  int pi, double t, std::string note)
+{
+    if (pi < 0 || pi >= (int)plots.size()) return;
+    PlotMarker m;
+    m.time = t;
+    m.source_plot = pi;
+    m.note = std::move(note);
+    for (auto* s : plots[pi].series) {
+        m.values.push_back(interpolate_at_time(*s, state, t));
+        m.labels.push_back(s->label);
+    }
+    state.markers.push_back(m);
+    if (state.markers.size() > MAX_MARKERS)
+        state.markers.erase(state.markers.begin());
+}
 
 void draw_time_series_panel(
     const char* window_title,
@@ -152,18 +192,31 @@ void draw_time_series_panel(
                     float val = interpolate_at_time(*s, state, mouse.x);
                     ImGui::Text("%s: %.4f", s->label.c_str(), val);
                 }
+                // And what a marker near the cursor has to say, on any plot
+                // rather than only on the one it was placed from — its line is
+                // drawn on all of them, so a reader can meet it on any of them.
+                //
+                // The annotation on the plot carries the first line only,
+                // because it is painted over the data whether anyone wants it
+                // or not.  The rest is here, where it costs nothing until
+                // somebody asks.  This is the tooltip #33 puts the raw flags in.
+                const float mouse_px = ImGui::GetMousePos().x;
+                for (const auto& mk : state.markers) {
+                    if (mk.note.empty()) continue;
+                    const float marker_px =
+                        ImPlot::PlotToPixels(mk.time, 0.0).x;
+                    if (std::abs(marker_px - mouse_px) > MARKER_HOVER_PIXELS)
+                        continue;
+                    ImGui::Separator();
+                    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+                    ImGui::TextUnformatted(mk.note.c_str());
+                    ImGui::PopTextWrapPos();
+                }
                 ImGui::EndTooltip();
 
                 // Click to place marker
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                    PlotMarker m;
-                    m.time = mouse.x;
-                    m.source_plot = pi;
-                    for (auto* s : pc.series) {
-                        m.values.push_back(interpolate_at_time(*s, state, mouse.x));
-                        m.labels.push_back(s->label);
-                    }
-                    state.markers.push_back(m);
+                    place_marker(state, plots, pi, mouse.x);
                 }
             }
 
@@ -188,14 +241,37 @@ void draw_time_series_panel(
                 if (mk.source_plot == pi) {
                     // Find Y position for annotation (use first series value)
                     float y_pos = mk.values.empty() ? 0.0f : mk.values[0];
-                    char annot_buf[128] = "";
-                    int pos = 0;
-                    for (size_t si = 0; si < mk.values.size() && pos < 120; ++si) {
-                        pos += std::snprintf(annot_buf + pos, sizeof(annot_buf) - pos,
-                            "%s%.4f", si > 0 ? "\n" : "", mk.values[si]);
+                    // A std::string rather than a 128-byte buffer: a note can
+                    // be a sentence, and the old one silently stopped at 120
+                    // characters — which for an explanation is the same as
+                    // being wrong, since the half that gets cut is the half
+                    // that says what it means.
+                    // A marker with a note shows the note, and a marker
+                    // without one shows the numbers.  Not both: these plots
+                    // dock to about 90 px each, which is four lines of text
+                    // including the axis, so an annotation carrying a two-line
+                    // note AND two values overflows the plot rect and ImPlot
+                    // clamps it — cutting off the top line, which is the line
+                    // that says what happened.  Measured in the browser at
+                    // 1440x900, where the panel is at its roomiest.
+                    //
+                    // The note wins because it is the part that cannot be got
+                    // any other way: the values at that instant are still on
+                    // the hover, and they are also just where the curve is.
+                    // Up to the blank line, per `PlotMarker::note`.
+                    std::string annot;
+                    if (!mk.note.empty()) {
+                        annot = mk.note.substr(0, mk.note.find("\n\n"));
+                    } else {
+                        char num[32];
+                        for (size_t si = 0; si < mk.values.size(); ++si) {
+                            std::snprintf(num, sizeof(num), "%.4f", mk.values[si]);
+                            if (!annot.empty()) annot += '\n';
+                            annot += num;
+                        }
                     }
                     ImPlot::Annotation(mx, y_pos, MARKER_COLOR,
-                                       ImVec2(5, -5), true, "%s", annot_buf);
+                                       ImVec2(5, -5), true, "%s", annot.c_str());
                 }
             }
 

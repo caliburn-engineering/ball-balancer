@@ -134,6 +134,7 @@ add_library(ball_dynamics STATIC
     src/setpoint_path.cpp
     src/trajectory_controls.cpp
     src/sim_step.cpp
+    src/loss_cause.cpp
     src/auto_balance.cpp
     src/ball_sim.cpp
     src/ball_plant_linear.cpp
@@ -231,6 +232,11 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(test_assembly_mode PRIVATE ball_dynamics)
     target_include_directories(test_assembly_mode PRIVATE tests)
     add_test(NAME test_assembly_mode COMMAND test_assembly_mode)
+
+    add_executable(test_loss_cause tests/test_loss_cause.cpp)
+    target_link_libraries(test_loss_cause PRIVATE ball_dynamics)
+    target_include_directories(test_loss_cause PRIVATE tests)
+    add_test(NAME test_loss_cause COMMAND test_loss_cause)
 
     add_executable(test_attract_mode tests/test_attract_mode.cpp)
     target_link_libraries(test_attract_mode PRIVATE ball_dynamics)

@@ -147,6 +147,22 @@ PlateView::PlateView()
         {"Condition Number",   {&s_cond_}, 3},
         {"Table Height [mm]",  {&s_zc_}, 4},
     };
+
+    // Which plot a lost ball's marker annotates.  Its LINE is drawn on every
+    // plot, so the frame is findable from any of them; the annotation, and so
+    // the cause, belongs on the plot where "it went too far" is the thing being
+    // read.
+    //
+    // Found by the SERIES rather than by the title, and found here rather than
+    // at the loss.  A title lookup would have been a string written twice, and
+    // renaming one copy leaves the other quietly falling back to whichever plot
+    // happens to be first — which is the failure the lookup existed to prevent,
+    // reached by the door it was not watching.  `s_bx_` cannot be renamed into
+    // a different plot: it IS the ball's x, and the plot that draws it is the
+    // one this belongs on.
+    for (int i = 0; i < static_cast<int>(plots_.size()); ++i)
+        for (const TimeSeries* s : plots_[i].series)
+            if (s == &s_bx_) loss_marker_plot_ = i;
 }
 
 void PlateView::attach(GLFWwindow* window) {
@@ -241,9 +257,58 @@ void PlateView::setDesign(const AutoBalanceDesign& d, bool offered,
     }
 }
 
+void PlateView::clearLoss() {
+    ball_on_plate_ = true;
+    loss_flags_ = LossFlags{};
+    loss_cause_ = LossCause::RolledOff;
+
+    // The world starts turning again, but only if this class stopped it.  A
+    // visitor who pressed Pause to read a trace and then put the ball back has
+    // not asked for the plots to start scrolling — that is their pause, and it
+    // is theirs to lift.
+    if (paused_by_loss_) {
+        plot_state_.paused = false;
+        paused_by_loss_ = false;
+    }
+}
+
+void PlateView::recordLoss() {
+    ball_on_plate_ = false;
+    loss_flags_ = lossFlags(report_, sim_);
+    loss_cause_ = lossCause(loss_flags_);
+
+    // The marker, whether or not anybody is going to be shown a banner.  With
+    // Auto-reset on the ball is about to be teleported back and the banner will
+    // never draw, and that is exactly the case where the record is worth most:
+    // the demo is about to look as though nothing happened.
+    //
+    // The cause and the raw flags go ON the plot; the sentence goes behind the
+    // hover, after the blank line.  The split matters: a phone has no hover, so
+    // everything a reader must be able to check for themselves has to be on the
+    // annotation.  See `PlotMarker::note`.
+    const std::string note =
+        std::string("lost: ") + lossCauseLabel(loss_cause_) + "\n" +
+        "flags: " + lossFlagsLine(loss_flags_) + "\n\n" +
+        lossCauseSentence(loss_cause_);
+    place_marker(plot_state_, plots_, loss_marker_plot_, sim_time_, note);
+
+    if (ball_auto_reset_) {
+        resetBall();
+        return;
+    }
+
+    // Stop the world.  `plot_state_.paused` IS the simulation's pause — `step`
+    // returns on it — so there is one pause rather than two that can disagree,
+    // and the plot panel's own button lifts it as it always did.
+    plot_state_.paused = true;
+    paused_by_loss_ = true;
+    plot_state_.pause_t_max = plot_state_.latest_time();
+    plot_state_.pause_t_min = plot_state_.pause_t_max - plot_state_.time_window;
+}
+
 void PlateView::resetBall() {
     sim_.ball = BallState{};
-    ball_on_plate_ = true;
+    clearLoss();
 }
 
 void PlateView::resetAll() {
@@ -269,7 +334,7 @@ void PlateView::resetAll() {
             s->data.clear();
     plot_state_.markers.clear();
     sim_time_ = 0.0f;
-    ball_on_plate_ = true;
+    clearLoss();
 }
 
 void PlateView::step(GLFWwindow* window, float dt) {
@@ -368,11 +433,6 @@ void PlateView::step(GLFWwindow* window, float dt) {
         else airborne_flash_s_ = std::max(0.0f, airborne_flash_s_ - dt);
     }
 
-    if (report_.left_plate) {
-        ball_on_plate_ = false;
-        if (ball_auto_reset_) resetBall();
-    }
-
     // --- Plots ---
     // `report_.ball_plate` rather than a second `plateFrame` call: this is the
     // ball the step just finished with, and asking again is how a plot comes to
@@ -398,11 +458,29 @@ void PlateView::step(GLFWwindow* window, float dt) {
     push_series(s_a2_,    legDeg(2), plot_state_);
     push_series(s_cond_,  static_cast<float>(condition_num_), plot_state_);
     push_series(s_zc_,    static_cast<float>(sim_.pose.z_c * 1000), plot_state_);
+
+    // --- And whether that was the last frame ---
+    //
+    // After the plots, not before, and the order is the whole reason this is
+    // down here rather than beside the other things `report_` is read for.  A
+    // loss pauses the simulation, and `push_time` and `push_series` both return
+    // on the pause — so handling it first would drop the frame the ball went on
+    // from every trace, and then put a marker at a time with no sample under
+    // it.  The instant the marker names has to be an instant the plots have.
+    if (report_.left_plate) recordLoss();
 }
 
 void PlateView::drawPanels() {
     drawControls();
     draw_time_series_panel("Plate Plots", plot_state_, plots_);
+
+    // If the pause is gone, it is not ours any more.  The plot panel's own
+    // Resume button is the other way out of a loss pause, and a visitor who
+    // takes it has spent this class's claim on the flag — otherwise a pause
+    // they later set deliberately would be lifted by Reset Ball, on the
+    // strength of a loss they had already resumed past.
+    if (!plot_state_.paused) paused_by_loss_ = false;
+
     comparison_panel_.draw();
 }
 
@@ -414,6 +492,17 @@ void PlateView::drawControls() {
     ImGui::Checkbox("Simulate ball", &ball_enabled_);
     ImGui::SameLine();
     ImGui::Checkbox("Auto-reset", &ball_auto_reset_);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted(
+            "Whether a lost ball is put straight back at the centre.  Off, the "
+            "loss is shown and you decide when to carry on.  On, it is the old "
+            "behaviour — the plot marker is still placed either way, so the "
+            "record survives even when nothing asks you to read it.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
 
     // Three lines, always, whatever the ball is doing.  A ball that has gone
     // off the edge used to collapse this whole block to a single line, which
@@ -434,8 +523,34 @@ void PlateView::drawControls() {
     // about a second, so the AIRBORNE line is now readable on its own and the
     // flash is what carries the tail of a short hop.
     if (!ball_on_plate_) {
+        // The banner: one cause, on the line that was already being drawn.
+        //
+        // It names ONE thing, and the four raw flags it was decided from are in
+        // the hover and in the plot marker.  One sentence that can be wrong is
+        // better than five flags that cannot be read — see `lossCause` for the
+        // precedence and why it is a claim about mechanism rather than a
+        // ranking of severity.
+        //
+        // Short, because #25 leaves this ticket owning what a phone can read on
+        // one line: the longest label is "workspace-clipped".  The sentence, the
+        // flags and the fact that the simulation has stopped are all in the
+        // hover, where there is room for them.
         ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
-                           "the ball has left the plate");
+                           "LOST - %s", lossCauseLabel(loss_cause_));
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+            ImGui::TextUnformatted(lossCauseSentence(loss_cause_));
+            ImGui::Separator();
+            ImGui::Text("raw flags: %s", lossFlagsLine(loss_flags_).c_str());
+            if (paused_by_loss_)
+                ImGui::TextUnformatted(
+                    "The simulation is stopped on the frame it happened, and "
+                    "there is a marker on the plots at that instant.  Reset "
+                    "Ball starts it again.");
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
     } else if (sim_.ball.airborne) {
         ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.15f, 1.0f),
                            "AIRBORNE  %+.1f mm, %+.0f mm/s",
@@ -459,7 +574,11 @@ void PlateView::drawControls() {
     if (ImGui::Button("Displace")) {
         sim_.ball = BallState{};
         sim_.ball.rolling << 0.06, -0.04, 0.0, 0.0;
-        ball_on_plate_ = true;
+        // Through `clearLoss` rather than setting the flag: this is one of the
+        // three routes that hands the visitor a ball again, and all three owe
+        // the same tidy-up — the banner down, and the pause lifted if the loss
+        // is what put it there.
+        clearLoss();
     }
     // Per AXIS, and the top is `kMaxNudgePerAxis` rather than `kMaxNudgeSpeed`
     // — because the two buttons above compose, and the hardest shove the
