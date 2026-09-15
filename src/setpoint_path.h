@@ -77,21 +77,43 @@ struct SetpointPath {
 /// Both measured, both against the shipped tuning with velocity feedforward.
 /// The ball trails the setpoint and overshoots the corners, so the path's own
 /// radius is not the radius the BALL reaches: at 180 mm and 283 mm/s the ball
-/// swings to 195 mm, and the plate loses it entirely beyond about 400 mm/s —
-/// a 250 mm circle at a two-second lap throws it clean off.
+/// swings to 195 mm.
 ///
 /// So the sliders are bounded rather than left to find that out.  A demo whose
 /// controls include a setting that breaks it is not offering a choice, it is
 /// offering a trap.
 ///
-/// **Both figures above were measured against a reference that slammed the
-/// legs at every corner, and neither has been re-measured since #31 filleted
-/// them.**  What HAS been re-measured is the sweep the cap exists to protect:
-/// over all 24 settings the sliders offer, the ball now reaches 192 mm and all
-/// 24 keep it — see `test_trajectory`.  Whether the cap itself can come up is
-/// a question for the ticket that closes #23, which owns re-measuring it; the
-/// two numbers are left standing here rather than quietly adjusted, because a
-/// bound whose stated reason has moved is worth noticing.
+/// **Re-measured under D16, and what it is about has changed.**  The old
+/// justification — "the plate loses it entirely beyond about 400 mm/s" — was
+/// taken against a reference that slammed the legs at every corner, and #31's
+/// fillet removed that.  Swept again over all 24 settings the sliders offer,
+/// against the plate that ships with its bouncing contact model, balls lost out
+/// of 24 at each cap:
+///
+/// | cap [m/s] | Nominal | Aggressive | Detuned | separations |
+/// |---|---|---|---|---|
+/// | **0.25** | **0** | **0** | **0** | none |
+/// | 0.30 | 0 | 0 | 0 | none |
+/// | 0.35 | 0 | 0 | 0 | 1, no loss |
+/// | 0.40 | 2 | 2 | 0 | 4 |
+/// | 0.50 | 2 | 2 | 1 | 5 |
+///
+/// So 0.25 is no longer the edge of anything: the envelope is clean to 0.35 and
+/// the two settings that break at 0.40 are the fast circles, not the corners
+/// the old number was chosen against.  **The cap is left where it is anyway,
+/// and it is now a margin rather than a limit.**  Raising a bound a visitor can
+/// see is a product decision rather than a consequence of a green table, and
+/// the pressure that argued for raising it is gone: the fillet took the 180 mm
+/// square's fastest offered lap from 24.75 s to 3.85 s on its own, so there is
+/// no longer a shape the sliders can only offer at a crawl.
+///
+/// What it IS about, now that it is not the loss boundary: the ball reaches
+/// 192 mm on the largest path at this cap against a 280 mm rim, and nothing on
+/// any offered setting ever leaves the plate.  That margin is what the demo
+/// spends on a visitor dragging two sliders at once.
+///
+/// See `test_trajectory`, which sweeps all 24 and counts them, and the decision
+/// record's D16.
 inline constexpr double kMaxSetpointSpeed = 0.25;   ///< [m/s]
 inline constexpr double kMaxPathRadius = 0.18;      ///< [m]
 

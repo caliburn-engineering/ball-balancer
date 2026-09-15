@@ -233,10 +233,10 @@ void test_a_dropped_plate_launches_the_ball_on_a_parabola() {
     ASSERT_NEAR(b.flight_p(2), p0(2) + v0(2) * t - 0.5 * kG * t * t, 1e-12);
 }
 
-// And it comes back.  Landing is inelastic: the approach speed along the
-// normal is absorbed, the sideways carry is kept, and the ball is rolling
-// again from where it touched down rather than from where it took off.
-void test_the_ball_lands_and_rolls_on() {
+// And it comes back — and bounces.  The first arrival reflects the approach
+// speed at `kRestitution`, the sideways carry is untouched, and the ball is
+// still in the air afterwards rather than stuck to the plate.
+void test_the_ball_bounces_when_it_arrives() {
     const TableKinematics tk(plate());
     const RollingBallDynamics dyn = roller();
     const TablePose pose{0.0, 0.0, 0.2121};
@@ -249,18 +249,257 @@ void test_the_ball_lands_and_rolls_on() {
     b.flight_v = Eigen::Vector3d(0.20, 0.0, 0.0);                   // drifting +x
 
     int frames = 0;
-    while (b.airborne && frames < 600) {
+    while (frames < 600) {
+        const double before = b.flight_v(2);
         b = stepBallContact(dyn, b, m, m, pose, kR, kG, dt);
         ++frames;
+        if (b.flight_v(2) > 0.0 && before < 0.0) break;
     }
-    ASSERT_TRUE(!b.airborne);
+    ASSERT_TRUE(b.airborne);
     // Free fall from 50 mm is about 0.10 s; one frame either side is fine.
     ASSERT_NEAR(frames * dt, std::sqrt(2.0 * 0.05 / kG), 0.02);
-    // Carried downrange while it fell, and still moving that way.
-    ASSERT_TRUE(b.rolling(0) > 0.04);
+    // It left at e times the speed a 50 mm drop arrives at.  Within a frame's
+    // worth of gravity, because the impact is resolved inside the frame by
+    // interpolation rather than exactly — the exact arithmetic is pinned by
+    // `test_a_rising_plate_throws_the_ball_harder`, which arranges an impact at
+    // a known instant.
+    ASSERT_NEAR(b.flight_v(2), kRestitution * std::sqrt(2.0 * kG * 0.05),
+                kG * dt);
+    // Carried downrange while it fell, and the sideways carry is untouched by
+    // the impact: no tangential impulse, deliberately.
+    ASSERT_TRUE(b.flight_p(0) > 0.04);
+    ASSERT_NEAR(b.flight_v(0), 0.20, 1e-12);
+    // And it ends the frame ABOVE the surface, having flown out the remainder
+    // of the frame under the rebound, so the next frame starts a flight rather
+    // than finding itself still touching.
+    ASSERT_TRUE(plateFrame(b, m, kR)(2) > kR);
+}
+
+// The bounce train ends, and it ends by running out of rebound rather than by
+// running out of patience.  When it does, the ball rolls on from where it
+// touched down carrying the speed it had sideways.
+void test_the_bounce_train_terminates() {
+    const TableKinematics tk(plate());
+    const RollingBallDynamics dyn = roller();
+    const TablePose pose{0.0, 0.0, 0.2121};
+    const double dt = 1.0 / 60.0;
+    const PlateMotion m = still(tk, 0, 0, pose.z_c);
+
+    BallState b;
+    b.airborne = true;
+    b.flight_p = Eigen::Vector3d(0.04, 0.0, pose.z_c + kR + 0.05);
+    b.flight_v = Eigen::Vector3d(0.20, 0.0, 0.0);
+
+    int frames = 0, bounces = 0;
+    while (b.airborne && frames < 6000) {
+        const double before = b.flight_v(2);
+        b = stepBallContact(dyn, b, m, m, pose, kR, kG, dt);
+        ++frames;
+        if (b.airborne && b.flight_v(2) > 0.0 && before < 0.0) ++bounces;
+        // No frame ever ends with the ball inside the plate.  This is what the
+        // sub-frame impact buys: bouncing at the frame boundary would leave the
+        // ball below the surface with the whole frame's extra fall counted as
+        // approach speed, which is how the train came to gain energy instead of
+        // losing it.
+        if (b.airborne) ASSERT_TRUE(plateFrame(b, m, kR)(2) >= kR);
+    }
+    ASSERT_TRUE(!b.airborne);
+
+    // e = 0.94 keeps 88% of the energy per bounce, so the train is long: from
+    // 0.99 m/s it takes ln(g dt / 2 / u0) / ln(e) = 40 rebounds to fall under
+    // the floor, and about 2 u0 e / (g (1 - e)) = 3.0 s of bouncing.
+    ASSERT_TRUE(bounces > 30 && bounces < 50);
+    ASSERT_TRUE(frames * dt > 2.0 && frames * dt < 4.0);
+
+    // Still drifting the way it was, still on the plate.
     ASSERT_NEAR(b.rolling(2), 0.20, 1e-9);
-    // The drop is gone, not turned into a bounce.
-    ASSERT_NEAR(b.rolling(3), 0.0, 1e-12);
+    ASSERT_TRUE(b.rolling(0) > 0.04);
+}
+
+// **Apex heights decay at `e^2` on a still plate**, which is the mechanism the
+// closed-loop no-pumping test in `test_attract_mode` measures against.  A
+// bounce that reflects `e` times the arrival speed reaches `e^2` times the
+// height, and nothing about the discretisation may add to that.
+void test_apexes_decay_at_e_squared_on_a_still_plate() {
+    const TableKinematics tk(plate());
+    const RollingBallDynamics dyn = roller();
+    const TablePose pose{0.0, 0.0, 0.2121};
+    const double dt = 1.0 / 60.0;
+    const PlateMotion m = still(tk, 0, 0, pose.z_c);
+
+    BallState b;
+    b.airborne = true;
+    b.flight_p = Eigen::Vector3d(0.0, 0.0, pose.z_c + kR + 0.05);
+
+    // The apex is a SAMPLE of a parabola rather than its turning point, so it
+    // under-reads by up to `g dt^2 / 8` — 0.34 mm, a fixed absolute error that
+    // is a fraction of a per cent of the first flights and a third of the last
+    // ones.  So the ratios are taken only while the hops are still above 20 mm,
+    // where that sample is worth under 2%, and the first flight is skipped
+    // outright: it is the drop this test sets up, released from rest exactly on
+    // a frame boundary, so its sample is a whole `g dt^2 / 2` low rather than an
+    // eighth of one — which means the first RATIO goes with it, since that one
+    // is measured against it.
+    double apex = 0.0, last_apex = 0.0, worst_ratio = 0.0;
+    int bounces = 0, measured = 0;
+    for (int k = 0; k < 600 && b.airborne; ++k) {
+        const double rising = b.flight_v(2);
+        b = stepBallContact(dyn, b, m, m, pose, kR, kG, dt);
+        if (!b.airborne) break;
+        apex = std::max(apex, plateFrame(b, m, kR)(2) - kR);
+        if (b.flight_v(2) > 0.0 && rising < 0.0) {   // a bounce closes an apex
+            ++bounces;
+            if (bounces >= 3 && apex > 0.020) {
+                worst_ratio = std::max(worst_ratio, apex / last_apex);
+                ++measured;
+            }
+            last_apex = apex;
+            apex = 0.0;
+        }
+    }
+    ASSERT_TRUE(measured >= 5);
+    // e^2 = 0.8836, and the worst of those is 0.8873 — four parts in a thousand
+    // above it, which is the apex sample and not the model.  The bar is 1%, and
+    // what it is really guarding is the SIGN of the error: a bounce taken at the
+    // frame boundary rather than at the crossing reflects a speed the ball never
+    // arrived at, and ratios climb past 1 and stay there.
+    ASSERT_TRUE(worst_ratio < kRestitution * kRestitution * 1.01);
+}
+
+// **Restitution acts on the RELATIVE normal velocity at the contact point**,
+// which is the whole difference between a bounce model and a bounce decoration:
+// a plate driven up into a falling ball throws it harder than it arrived, and a
+// plate running away catches it softly.  The same term is what makes a
+// deliberate hop possible at all — and what `holdContactDown` exists to stop
+// the loop doing by accident.
+void test_a_rising_plate_throws_the_ball_harder() {
+    const TableKinematics tk(plate());
+    const RollingBallDynamics dyn = roller();
+    const TablePose pose{0.0, 0.0, 0.2121};
+    const double dt = 1.0 / 60.0;
+    const double drop = 1.0;   // [m/s] arriving
+
+    // Three plates at the same place, differing only in how they are moving.
+    // Flush with the surface and already moving into it, so the impact is at
+    // the frame's open and the arrival speed is exactly `drop`.
+    auto arrive = [&](double plate_vz) {
+        PlateMotion m = still(tk, 0, 0, pose.z_c);
+        m.c_dot = Eigen::Vector3d(0, 0, plate_vz);
+        BallState b;
+        b.airborne = true;
+        b.flight_p = Eigen::Vector3d(0.0, 0.0, pose.z_c + kR);
+        b.flight_v = Eigen::Vector3d(0.0, 0.0, -drop);
+        b = stepBallContact(dyn, b, m, m, pose, kR, kG, dt);
+        return b;
+    };
+
+    const BallState still_plate = arrive(0.0);
+    const BallState rising = arrive(0.5);
+    const BallState receding = arrive(-0.5);
+
+    ASSERT_TRUE(still_plate.airborne && rising.airborne);
+
+    // The approach is (v_ball - v_plate) . n, so a plate rising at 0.5 m/s is
+    // approached 0.5 m/s faster and the rebound is e times that much more —
+    // and the ball leaves in the WORLD carrying the plate's velocity too.  Each
+    // then flies out the remainder of the frame, which is all of it.
+    auto leaves_at = [&](double plate_vz) {
+        return plate_vz + kRestitution * (drop + plate_vz) - kG * dt;
+    };
+    ASSERT_NEAR(still_plate.flight_v(2), leaves_at(0.0), 1e-12);
+    ASSERT_NEAR(rising.flight_v(2), leaves_at(0.5), 1e-12);
+    ASSERT_TRUE(rising.flight_v(2) > still_plate.flight_v(2) + 0.9);
+
+    // And a plate running away at 0.5 m/s takes half the arrival out of the
+    // rebound, which is the same arithmetic pointed the other way.
+    ASSERT_NEAR(receding.flight_v(2), leaves_at(-0.5), 1e-12);
+    ASSERT_TRUE(receding.flight_v(2) < still_plate.flight_v(2) - 0.9);
+
+    // And `contactNormalRate` is the `p` in that arithmetic, read straight off
+    // the plate rather than reconstructed: the loop constrains this number, the
+    // bounce consumes it, and they must be the same quantity.
+    PlateMotion up = still(tk, 0, 0, pose.z_c);
+    up.c_dot = Eigen::Vector3d(0, 0, 0.5);
+    ASSERT_NEAR(contactNormalRate(up, Eigen::Vector3d(0.0, 0.0, kR)), 0.5, 1e-12);
+}
+
+// The floor is derived from the frame rate, not chosen against the passive
+// case: a rebound whose whole flight fits inside one frame is not small, it is
+// unrepresentable.  So it moves when `dt` does, and a ball that is genuinely
+// hopping cannot reach it.
+void test_the_bounce_floor_is_the_frame_rate_and_nothing_else() {
+    ASSERT_NEAR(bounceFloorSpeed(kG, 1.0 / 60.0), 0.5 * kG / 60.0, 1e-15);
+    ASSERT_NEAR(bounceFloorSpeed(kG, 1.0 / 60.0), 0.08175, 1e-5);
+    // Halve the step and the simulation resolves twice as fine a bounce.
+    ASSERT_NEAR(bounceFloorSpeed(kG, 1.0 / 120.0),
+                0.5 * bounceFloorSpeed(kG, 1.0 / 60.0), 1e-15);
+
+    // A rebound exactly at the floor rises for exactly one frame: u dt - g dt^2
+    // / 2 = 0 at u = g dt / 2.  That is the sense in which it is the smallest
+    // representable bounce and not a threshold anybody picked.
+    const double dt = 1.0 / 60.0;
+    const double u = bounceFloorSpeed(kG, dt);
+    ASSERT_NEAR(u * dt - 0.5 * kG * dt * dt, 0.0, 1e-18);
+
+    // And it is the floor on the REBOUND, so the arrival it fires at is
+    // `u/e` — 87 mm/s, which lifts the ball 0.39 mm.  The passive hops this
+    // model was built to find are millimetres, and a deliberate hop is a
+    // feature nobody would build at a third of a millimetre.
+    ASSERT_NEAR(u / kRestitution, 0.08697, 1e-5);
+}
+
+// Either side of the floor, through `stepBallContact` rather than in
+// arithmetic: just above it the ball bounces, just below it the ball is landed
+// and rolling.
+void test_a_rebound_below_the_floor_lands_instead() {
+    const TableKinematics tk(plate());
+    const RollingBallDynamics dyn = roller();
+    const TablePose pose{0.0, 0.0, 0.2121};
+    const double dt = 1.0 / 60.0;
+    const PlateMotion m = still(tk, 0, 0, pose.z_c);
+    const double floor_u = bounceFloorSpeed(kG, dt);
+
+    // Arrive at a chosen speed, by starting flush with the surface so the one
+    // step both applies gravity and makes contact.
+    auto arrive_at = [&](double approach) {
+        BallState b;
+        b.airborne = true;
+        b.flight_p = Eigen::Vector3d(0.0, 0.0, pose.z_c + kR);
+        b.flight_v = Eigen::Vector3d(0.0, 0.0, -approach);
+        return stepBallContact(dyn, b, m, m, pose, kR, kG, dt);
+    };
+
+    ASSERT_TRUE(arrive_at(1.02 * floor_u / kRestitution).airborne);
+    ASSERT_TRUE(!arrive_at(0.98 * floor_u / kRestitution).airborne);
+}
+
+// A bounce is a claim about the plate's velocity, so it is refused on the same
+// grounds a separation is.  Near a singularity the rates are arithmetic rather
+// than physics, and a rebound built on them would be a launch the mechanism
+// never performed — the ball lands instead, which is what it did before this
+// model could bounce at all.
+void test_untrusted_rates_land_the_ball_rather_than_bouncing_it() {
+    const TableKinematics tk(plate());
+    const RollingBallDynamics dyn = roller();
+    const TablePose pose{0.0, 0.0, 0.2121};
+    const double dt = 1.0 / 60.0;
+
+    PlateMotion m = still(tk, 0, 0, pose.z_c);
+    m.c_dot = Eigen::Vector3d(0, 0, 12.0);   // the wild rate a bad solve returns
+
+    BallState b;
+    b.airborne = true;
+    b.flight_p = Eigen::Vector3d(0.0, 0.0, pose.z_c + kR);
+    b.flight_v = Eigen::Vector3d(0.0, 0.0, -0.5);
+
+    m.rates_trustworthy = true;
+    const BallState trusted = stepBallContact(dyn, b, m, m, pose, kR, kG, dt);
+    ASSERT_TRUE(trusted.airborne);
+    ASSERT_TRUE(trusted.flight_v(2) > 10.0);   // launched, by the arithmetic
+
+    m.rates_trustworthy = false;
+    const BallState doubted = stepBallContact(dyn, b, m, m, pose, kR, kG, dt);
+    ASSERT_TRUE(!doubted.airborne);
 }
 
 // The plate-frame view is the same physical ball in both phases.  Converting a
@@ -586,7 +825,13 @@ int main() {
     test_a_rolling_ball_is_held_differently_from_a_still_one();
     test_a_settled_plate_never_lets_go();
     test_a_dropped_plate_launches_the_ball_on_a_parabola();
-    test_the_ball_lands_and_rolls_on();
+    test_the_ball_bounces_when_it_arrives();
+    test_the_bounce_train_terminates();
+    test_apexes_decay_at_e_squared_on_a_still_plate();
+    test_a_rising_plate_throws_the_ball_harder();
+    test_the_bounce_floor_is_the_frame_rate_and_nothing_else();
+    test_a_rebound_below_the_floor_lands_instead();
+    test_untrusted_rates_land_the_ball_rather_than_bouncing_it();
     test_the_two_frames_describe_the_same_ball();
     test_untrustworthy_rates_never_separate_the_ball();
     test_a_trustworthy_frame_after_an_untrusted_one_still_declines();

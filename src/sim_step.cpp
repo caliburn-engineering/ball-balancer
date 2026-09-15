@@ -127,6 +127,19 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
         cmd_rad = c.alpha_rad;
         out.saturated = c.saturated;
         out.clipped = c.clipped_to_holdable;
+
+        // And while the ball is in the air the command is constrained as well
+        // as computed: the plate may steer under the ball but it may not lift
+        // its contact point into it.  Restitution acts on the RELATIVE normal
+        // velocity, so a rising plate hands a bouncing ball back more than it
+        // arrived with — measured, `predictedLanding` alone phase-locks to the
+        // bounce and feeds in about 5% an impact against the 12% `e^2` takes
+        // out.  Constraining that one scalar makes non-pumping a proof; see
+        // `holdContactDown` and the decision record's D8.
+        if (s.ball.airborne) {
+            cmd_rad = holdContactDown(tk, in.design, s.motion, s.alpha_rad,
+                                      cmd_rad, bp.head<3>());
+        }
     }
     out.cmd_rad = cmd_rad;
 
@@ -180,10 +193,17 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
     if (in.ball_enabled) {
         s.ball = stepBallContact(plate.rolling(), s.ball, s.motion,
                                  s.motion_prev, s.pose, r_ball, g, in.dt,
-                                 &out.normal_accel);
+                                 &out.normal_accel, &out.impact_approach);
     }
     out.airborne = s.ball.airborne;
     out.ball_plate = plateFrame(s.ball, s.motion, r_ball);
+    // What the contact point under the ball is doing vertically, at the end of
+    // the frame the command was constrained for.  Reported rather than
+    // recomputed by a caller, for `SimReport::normal_accel`'s reason: it is the
+    // `p` the bounce acts on, and a second opinion about which plate motion and
+    // which ball position it was taken at will differ.
+    out.contact_normal_rate =
+        contactNormalRate(s.motion, out.ball_plate.head<3>());
 
     // Reported, never acted on.  A ball nobody is simulating cannot fall off,
     // so the question is not even asked of one.

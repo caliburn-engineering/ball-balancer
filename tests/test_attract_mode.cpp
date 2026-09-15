@@ -480,12 +480,12 @@ void test_the_kick_is_rejected_from_every_direction() {
 // buttons offer.  Not marginally — the worst frame of 72 directions still has
 // 1.62 m/s^2 of normal force in hand, a sixth of a g.
 //
-// What this deliberately does NOT do is map where the tuning DOES start to let
-// go.  That is a sweep over speed as well as direction, it is
-// [#31](https://github.com/caliburn-engineering/caliburn/issues/31)'s, and it
-// is one of the harnesses #30 exists to be written against.  The one-line
-// answer, unpinned until then: above about 0.30 m/s, in narrow slivers of
-// direction, by fractions of a millimetre.
+// Where the tuning DOES start to let go is mapped elsewhere, because it is a
+// different question: this sweep shoves a ball that has settled at the centre
+// of a level plate, and the demo's Nudge button shoves one that is already
+// tracking a circle with the legs already displaced.  That envelope, swept over
+// speed as well as direction, is at `kMaxNudgeSpeed` — and at the bound it
+// chooses the shipped tuning separates the ball in about one run in nine.
 void test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance() {
     const auto models = getBuiltinModels();
     const auto& e = cascadeModel(models);
@@ -633,15 +633,33 @@ void test_the_rate_limit_is_insurance_rather_than_a_tax() {
 // because the OLD one is what chose `kMaxNudgeSpeed`, and a bound whose reason
 // has moved is worth noticing rather than quietly adjusting.
 //
-// **The bound is deliberately left at 0.30, and it is owned rather than
-// orphaned.**  What this measurement retires is the evidence FOR 0.30, not the
-// case for having a bound: the envelope beyond 0.50 is unmeasured, and raising
-// a limit is a product decision rather than a consequence of a green table.
-// `kMaxSetpointSpeed` is in exactly this position after #31, and both belong to
-// the same sweep — the decision record's D16, which the ticket closing #23
-// owns.  Re-measuring either against today's contact model would be wasted
-// anyway: #23's round two makes landing bounce, and restitution moves the
-// separation behaviour this envelope is made of.
+// **AND RE-MEASURED AGAIN, AFTER THE LANDING BECAME A BOUNCE, WHICH IS WHERE
+// THE BOUND ACTUALLY MOVED.**  #23's round two gives the landing a coefficient
+// of restitution, and restitution moves the separation behaviour this whole
+// envelope is made of: a shove hard enough to separate the ball used to end
+// with it arriving and sticking, and now starts a train running about
+// `e/(1-e) = 16` times the first flight.  For that second or so the ball is
+// barely steerable — no rolling friction acts on it, and the plate can reach it
+// only through the horizontal component of a normal impulse at each contact.
+// Same 36 x 24 grid, against the contact model that ships:
+//
+//     speed   Nominal   Aggressive   Detuned      (failures out of 864)
+//     0.18       0           0          0
+//     0.20       0           0          0
+//     0.22       0           1          0
+//     0.24       0           0          0
+//     0.25       4           2          0
+//     0.30      10          35          0
+//
+// Detuned's row is again the reminder that these are slivers: 0.22 loses one
+// direction and 0.24 loses none, which is what a 24-direction grid looks like
+// walking past the side of one.  So the bound is the last speed BELOW the first
+// failure of any tuning rather than the last clean row — **0.20**, by the same
+// reading that put it at 0.30 against the table above.
+//
+// `kMaxSetpointSpeed` was re-measured in the same pass and did NOT move; see
+// its own header for what it turned out to be about.  Both were the decision
+// record's D16, and the ticket closing #23 owns them.
 struct Tracked {
     bool lost = false;
     double end_error = 0.0;   ///< [m] ball to setpoint, twenty seconds later
@@ -721,6 +739,127 @@ void test_the_nudge_buttons_cannot_compose_past_the_bound() {
     ASSERT_TRUE(kMaxNudgePerAxis < kMaxNudgeSpeed);
 }
 
+// **The no-pumping property, with the loop closed.**  This is what #23 closes
+// on, and it is a claim about one scalar.
+//
+// Restitution acts on the RELATIVE normal velocity at the contact point, so a
+// ball arriving at `u` onto a contact point rising at `p` leaves at
+//
+//     u_rebound = e u + p (1 + e)
+//
+// `p <= 0` therefore gives `u_rebound <= e u` — the bounce can never return
+// more than it took — and a rising plate always adds energy, at 1.94x its own
+// speed at `e = 0.94`.  That is a hard result about the impact law rather than
+// a tuning, which is why the loop is handed a constraint (`holdContactDown`)
+// instead of a fourth airborne target to chase.  The law itself is pinned in
+// `test_ball_contact`, on a plate built by hand where the arithmetic is exact;
+// what this pins is that the constraint SURVIVES the closed loop.
+//
+// **It is not asserted as an apex ratio, and the decision record's D10 asked
+// for one.**  `e^2` bounds the ratio of successive apex HEIGHTS only over a
+// plate that holds still, which is how the bounce was validated in
+// `test_apexes_decay_at_e_squared_on_a_still_plate`.  With the loop running the
+// plate does not hold still: it descends under a ball it has just let go of, so
+// the gap grows with no energy entering the ball at all, and a plate-frame apex
+// ratio measures the plate's retreat rather than the bounce.  Measured that way
+// this sweep reports ratios near 2 with `p` pinned to a thousandth of a metre
+// per second, which is the metric failing rather than the mechanism.  So the
+// mechanism is asserted directly.
+//
+// **Where the guarantee is given up, and by how much.**  `holdContactDown` asks
+// for the leg rate that cancels the rise and stops there; two things can keep
+// the plate from delivering it, and both are saturations rather than errors.
+// The servo rate limit (#32) caps how fast a leg may move, and the retreat into
+// the holdable set (#29) scales the whole triple back toward a level pose that
+// sits higher than the one being asked for.  Measured over this sweep, frames
+// where the contact point rose faster than 10 mm/s, out of every frame the ball
+// entered airborne:
+//
+//     Nominal        0 of 2344     worst +0.0008 m/s
+//     Aggressive    70 of 5359     worst +0.2959 m/s
+//     Detuned        0 of 1871     worst +0.0009 m/s
+//
+// Aggressive is the tuning that slams the legs hardest, so it is the one that
+// runs the servo out of speed, and the allowance below is written per tuning
+// rather than as one loose number that would let Nominal rot quietly.
+void test_the_loop_never_pumps_a_bouncing_ball() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+    const SimPlate plate = cascadePlate(e.params);
+
+    struct Tuning {
+        const char* name;
+        Eigen::MatrixXd K;
+        int allowed_rising;    ///< frames the contact point may rise on
+        double worst_rise;     ///< [m/s] and by no more than this
+    };
+    Tuning tunings[] = {
+        {"Nominal", defaultGain(e), 0, 0.01},
+        {"Aggressive", gainForPreset(e, presetNamed("Aggressive")), 140, 0.35},
+        {"Detuned", gainForPreset(e, presetNamed("Detuned")), 0, 0.01},
+    };
+
+    for (Tuning& t : tunings) {
+        int separated = 0, airborne = 0, rising = 0, impacts = 0, unended = 0;
+        double worst_rise = 0.0;
+        for (int i = 0; i < 12; ++i) {
+            for (int j = 0; j < 12; ++j) {
+                SimInput in;
+                in.design = cascadeDesign(e.params);
+                in.design.K = t.K;
+                in.path = openingPath();
+                SimState s = simStart(plate, in.design.home_leg_rad,
+                                      attractStart(in.path));
+                const int at =
+                    static_cast<int>((i / 12.0) * in.path.period_s / in.dt);
+                const int total = at + static_cast<int>(20.0 / in.dt);
+                const double theta = j * M_PI / 6.0;
+
+                bool was_airborne = false, ever = false;
+                for (int k = 0; k < total; ++k) {
+                    if (k == at && !s.ball.airborne) {
+                        s.ball.rolling(2) += kMaxNudgeSpeed * std::cos(theta);
+                        s.ball.rolling(3) += kMaxNudgeSpeed * std::sin(theta);
+                    }
+                    const SimReport f = stepSim(plate, in, s);
+
+                    // Only frames the ball ENTERED airborne are the
+                    // constraint's.  The frame a separation happens on is one
+                    // where the ball was still on the plate when the command
+                    // was chosen — and the plate may well have been rising
+                    // then, since it separated the ball by accelerating away
+                    // from it rather than by descending.
+                    if (was_airborne) {
+                        if (f.contact_normal_rate > 0.01) ++rising;
+                        worst_rise = std::max(worst_rise, f.contact_normal_rate);
+                    }
+                    if (f.impact_approach < 0.0) ++impacts;
+                    if (f.airborne) { ever = true; ++airborne; }
+                    was_airborne = f.airborne;
+
+                    // The ball stays on the plate throughout, which is the
+                    // claim `kMaxNudgeSpeed` is chosen to make.
+                    ASSERT_TRUE(!f.left_plate);
+                    if (k + 1 == total && f.airborne) ++unended;
+                }
+                if (ever) ++separated;
+            }
+        }
+        // The sweep has to be measuring something.  A change that stopped the
+        // ball separating at all would otherwise pass this test perfectly by
+        // never testing it — which is how the 30-of-72 hop rate came to be
+        // prose in the first place.
+        ASSERT_TRUE(separated > 5);
+        ASSERT_TRUE(impacts > 100);
+        // And every train ends.  `bounceFloorSpeed` is what makes that true on
+        // a still plate; this says the loop does not keep one alive.
+        ASSERT_EQ(unended, 0);
+
+        ASSERT_TRUE(rising <= t.allowed_rising);
+        ASSERT_TRUE(worst_rise < t.worst_rise);
+    }
+}
+
 // The Aggressive preset (#19), against the disturbance the demo itself
 // offers.  It saturates the servos from every direction and still brings the
 // ball home from every direction, which is what makes saturation a bounded
@@ -775,8 +914,7 @@ void test_the_aggressive_preset_recovers_from_every_direction() {
 // it is worth making.
 //
 // **The size of the hop is nothing like what this test used to claim.**  It
-// said "one launch reached 689 mm of altitude"; the ball now rises 2.1 mm.  Two
-// of the reasons are in
+// said "one launch reached 689 mm of altitude".  Two of the reasons are in
 // `test_the_shipped_tuning_holds_the_ball_through_its_own_disturbance` above —
 // a differenced acceleration answering a stepping command with a delta
 // function (#23), and a harness taking the servo rate at the wrong instant
@@ -788,6 +926,25 @@ void test_the_aggressive_preset_recovers_from_every_direction() {
 // this same disturbance.  That is still the honest ceiling on #19's aggressive
 // preset, and still a far better demonstration of over-aggressive control than
 // a settling time.
+//
+// **Both of this test's own numbers moved when the landing became a bounce,
+// and the interesting half is the direction count.**  It said the ball leaves
+// in 1 of 90 directions and rises 2.1 mm; it now leaves in 90 of 90 and rises
+// 28.7 mm.  The count did not move because the gain got worse — it moved
+// because a separation that lasted one frame became one that lasts seconds,
+// and a one-frame separation was invisible to a test that samples
+// `SimReport::airborne` at the frame boundary.  The ball was leaving all along;
+// under `kRestitution` it stays gone long enough to be seen.
+//
+// Which also relocates the cause.  This sweep settles the ball from 60, -40 mm
+// before it shoves it, and at Q = 2000 the ball separates on frame 11 of that
+// settling — the same frame in every direction, because the shove has not
+// happened yet.  So what the 90 counts is the tuning throwing the ball while
+// merely *centring* it, which is a stronger statement about the gain than the
+// disturbance sweep was making.
+//
+// The ball still comes back and stays on the plate in every direction, and the
+// plate still never leaves the assembly it is built in.
 void test_an_over_aggressive_tuning_takes_the_ball_off_the_surface() {
     const auto models = getBuiltinModels();
     const auto& e = cascadeModel(models);
@@ -830,17 +987,22 @@ void test_an_over_aggressive_tuning_takes_the_ball_off_the_surface() {
         }
         if (airborne_here) ++separated;
     }
-    // It really does take the ball off the surface.  One direction of these 90,
-    // which is thin — the 720-direction sweep finds 16 and is what says the
-    // sliver is real; this test stays at 90 because it runs on every build.
-    ASSERT_TRUE(separated >= 1);
+    // It really does take the ball off the surface — every one of these 90
+    // directions, because the separation is in the settling they share rather
+    // than in the shove that distinguishes them.  Asserted as "all of them"
+    // rather than "at least one": a tuning that only threw the ball on a
+    // shove would be a materially better tuning than this one, and should
+    // fail here rather than pass quietly.
+    ASSERT_EQ(separated, 90);
     // And does not lose it, at the disturbance the demo's own buttons offer.
     ASSERT_EQ(lost, 0);
-    // Millimetres, not metres: 2.1 mm measured over these 90 directions.  Both
-    // bounds are assertions — too small and the plate has stopped letting go at
-    // all, too large and something is differencing a step again.
-    ASSERT_TRUE(peak_hop > 0.0005);
-    ASSERT_TRUE(peak_hop < 0.020);
+    // Millimetres, not metres: 28.7 mm measured over these 90 directions,
+    // against the 689 mm this test once claimed and the 2.1 mm it claimed
+    // while the ball could not bounce.  Both bounds are assertions — too small
+    // and the plate has stopped letting go at all, too large and something is
+    // differencing a step again.
+    ASSERT_TRUE(peak_hop > 0.005);
+    ASSERT_TRUE(peak_hop < 0.060);
 }
 
 }  // namespace
@@ -856,6 +1018,7 @@ int main() {
     test_the_rate_limit_is_insurance_rather_than_a_tax();
     test_a_shove_while_tracking_is_rejected_from_every_direction();
     test_the_nudge_buttons_cannot_compose_past_the_bound();
+    test_the_loop_never_pumps_a_bouncing_ball();
     test_the_aggressive_preset_recovers_from_every_direction();
     test_an_over_aggressive_tuning_takes_the_ball_off_the_surface();
     test_ten_minutes_unattended_never_loses_the_ball();

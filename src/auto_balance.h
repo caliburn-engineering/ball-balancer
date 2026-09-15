@@ -1,6 +1,7 @@
 // src/auto_balance.h
 #pragma once
 
+#include "ball_contact.h"
 #include "table_kinematics.h"
 
 #include <Eigen/Core>
@@ -229,6 +230,79 @@ Eigen::Vector2d predictedLanding(const Eigen::Matrix<double, 6, 1>& ball_plate,
                                  double ball_radius,
                                  double gravity);
 
+/// The leg command with its heave held down until the plate's contact point
+/// under the ball cannot rise.  **The no-pumping constraint, and it is a proof
+/// rather than a measurement.**
+///
+/// Restitution acts on the relative normal velocity at the contact point, so a
+/// ball arriving at `u` onto a contact point rising at `p` leaves at
+///
+///     u_rebound = e u + p (1 + e)
+///
+/// `p <= 0` therefore gives `u_rebound <= e u` and an apex ratio of at most
+/// `e^2`, **always**, whatever else the loop is doing.  A rising plate always
+/// adds energy, at `1.94x` its own speed at `e = 0.94`.  That is a hard result
+/// about the impact law and not a tuning, which is why the loop is given the
+/// one scalar to constrain rather than a fourth target to chase.
+///
+/// **Why a constraint and not a better setpoint.**  Four airborne control laws
+/// were measured against the 72-direction and 24-setting sweeps and all four
+/// were worse than or equal to doing nothing: `predictedLanding` with the
+/// ball's velocity zeroed (what ships), the landing point plus the real
+/// velocity, `predictedRest`, and keeping the path feedforward through the
+/// flight.  They were not four control laws.  `K`'s output is a leg TRIPLE,
+/// which is simultaneously tilt (differential) and heave (common-mode), and
+/// those do different jobs while the ball is in the air — tilt aims the normal
+/// impulse at landing, heave sets its magnitude.  Feeding a single target
+/// through `K` leaves their relative phase uncontrolled, so all four were
+/// different ways of saying nothing about `p`.  Worst of them, `predictedLanding`
+/// alone: the prediction collapses onto the ball at every impact and springs
+/// out again at every rebound, so a bouncing ball hands the loop a target
+/// oscillating at the bounce frequency, the plate rises about 0.02 m/s into
+/// each arrival, and that feeds back roughly 5% per impact against the 12%
+/// `e^2` takes out.  See the decision record's D8.
+///
+/// **Tilt authority is untouched, and exactly so.**  The correction is the leg
+/// rate that `J_v` maps to pure heave — `J_v^-1 (0, 0, dz)` — so `phi_dot` and
+/// `theta_dot` come out bit for bit unchanged and `omega` with them.  A uniform
+/// `(1, 1, 1)` would have been the obvious reading of "common-mode" and is not
+/// the same thing away from the symmetric pose, where it tilts the plate
+/// slightly as it lifts it.
+///
+/// `p` is HOMOGENEOUS in the leg rates, which is what makes it enough to
+/// evaluate this at the frame's open: the servo carries `cmd - alpha` across
+/// the frame by a factor of `exp(-dt/tau)`, and scaling every leg rate by a
+/// positive constant scales `p` by it too.  So a command that puts the
+/// frame-open `p` at zero puts the frame-end `p` at zero, and one that makes it
+/// negative keeps it negative.  What IS one frame stale is the geometry — `R`,
+/// `J_v` and the ball's place on the plate are this frame's, and the rates they
+/// weigh are next frame's.
+///
+/// **It fails safe and it can fail.**  The worst case if the constraint binds
+/// every frame is a plate that holds still, which is the incumbent best.  But
+/// the correction is clamped to the servo travel and retreated into the
+/// holdable set like any other command, and `omega x R s` is not heave's to
+/// cancel once the legs run out — a plate stranded low and tilted can still
+/// carry its contact point upward through a tilt it needs for pose recovery.
+/// `SimReport::contact_normal_rate` is what says whether that happened, and
+/// `test_attract_mode` asserts on it rather than trusting this header.
+///
+/// Returns `cmd_rad` unchanged when the contact point is already level or
+/// falling, when there is no lag to convert a rate into a command, and when
+/// `plate.rates_trustworthy` is false — the last for the reason the contact
+/// model refuses a separation on the same flag: near a singularity `J_v` is
+/// arithmetic rather than physics, and inverting it would be commanding a leg
+/// rate to cancel a plate motion nobody can vouch for.
+///
+/// `ball_s` is the ball's centre in the plate frame, the same point
+/// `contactNormalRate` is defined at.
+std::array<double, 3> holdContactDown(const TableKinematics& tk,
+                                      const AutoBalanceDesign& d,
+                                      const PlateMotion& plate,
+                                      const std::array<double, 3>& alpha_rad,
+                                      const std::array<double, 3>& cmd_rad,
+                                      const Eigen::Vector3d& ball_s);
+
 /// Advance the three rate-limited first-order servos one step, in closed form.
 ///
 /// The servo is a first-order lag that cannot be driven faster than
@@ -314,35 +388,47 @@ Eigen::VectorXd defaultLqrInputWeights(int m);
 /// checks the presets against it — raise it and the test fails, which is the
 /// point.
 ///
-/// **It was 0.5, and 0.5 was measured against the wrong situation.**  That
-/// number came from shoving a ball sitting at rest at the centre of a level
-/// plate with a held setpoint, and from rest every shipped tuning does survive
-/// it.  The demo does not open like that: it opens tracking a circle, so the
-/// legs are already displaced and the ball is already running at 75 mm/s when
-/// the visitor reaches for Nudge.  A shove there lands on a plate that is
-/// already working, and the envelope is much smaller — measured over 36 points
-/// of the lap and 24 directions, every preset is clean at 0.30 and Nominal
-/// loses the ball at 0.35.  See
-/// `test_a_shove_while_tracking_is_rejected_from_every_direction`.
+/// **It was 0.5, then 0.3, and it is 0.2 because the ball learned to bounce.**
+/// Each move was a measurement rather than a taste:
+///
+///   - **0.5 was measured from rest at the centre of a level plate**, and the
+///     demo does not open like that.  It opens tracking a circle, so the legs
+///     are already displaced and the ball is already running at 75 mm/s when
+///     the visitor reaches for Nudge.  A shove there lands on a plate that is
+///     already working.
+///   - **0.3 was that envelope measured against a ball that could not bounce.**
+///     A shove hard enough to separate the ball used to end with it arriving
+///     and sticking; with `kRestitution` it arrives and leaves again, and the
+///     train that follows runs about `e/(1-e) = 16` times the first flight —
+///     a second of a ball the plate can only reach through the horizontal
+///     component of a normal impulse at each contact.
+///
+/// Re-measured on the same 36 x 24 grid — 36 points of the lap, 24 directions,
+/// shoving a ball that is already tracking the opening circle — against the
+/// contact model that ships, `holdContactDown` included, balls lost out of 864:
+///
+/// | speed | Nominal | Aggressive | Detuned |
+/// |---|---|---|---|
+/// | 0.18 | 0 | 0 | 0 |
+/// | **0.20** | **0** | **0** | **0** |
+/// | 0.22 | 0 | 1 | 0 |
+/// | 0.24 | 0 | 0 | 0 |
+/// | 0.25 | 4 | 2 | 0 |
+/// | 0.30 | 10 | 35 | 0 |
 ///
 /// The slivers thin as the shove shrinks rather than stopping at a threshold —
-/// the same shape as `kMaxSetpointSpeed`'s bound, and the same reason for
-/// leaving margin rather than sitting on the first clean measurement.
+/// 0.22 loses one direction and 0.24 loses none, which is what a sliver looks
+/// like when a 24-direction grid walks past the side of one — so the bound is
+/// the last speed BELOW the first of them rather than the last clean row.
+/// That is the same reading that put it at 0.3 against the old table, applied
+/// to the new one.
 ///
-/// **The measurement above is stale and the bound is left standing anyway.**
-/// Since #29 the plate may not steer itself past a Jacobian condition number of
-/// 20, and every failure in that table is gone: re-measured on the same 36 x 24
-/// grid, all three tunings are clean at 0.35, 0.40, 0.45 and 0.50.  "Nominal
-/// loses the ball at 0.35" is no longer true.
-///
-/// So what #29 retired is the evidence FOR 0.30, not the case for a bound.  The
-/// envelope past 0.50 is unmeasured, and raising a limit is a product decision
-/// rather than a consequence of a green table.  `kMaxSetpointSpeed` is in
-/// exactly this position after #31, and both belong to the same re-measurement:
-/// see the decision record's D16 and the ticket that closes #23, which owns it.
-/// The number is left where it is rather than quietly adjusted, because a bound
-/// whose stated reason has moved is worth noticing.
-constexpr double kMaxNudgeSpeed = 0.30;
+/// **What the constraint is worth, at the bound.**  Without `holdContactDown`
+/// the same grid at 0.20 loses 6, 7 and 3 of 144, throws the ball up to 1.29 m
+/// off the plate, and lets successive arrivals grow twelvefold; with it,
+/// nothing is lost, the hop is under 110 mm and no arrival more than doubles.
+/// The bound is what is left over after the constraint, not instead of it.
+constexpr double kMaxNudgeSpeed = 0.20;
 
 /// What one Nudge button may add along its own axis.
 ///

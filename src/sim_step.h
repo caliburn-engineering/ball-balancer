@@ -242,6 +242,34 @@ struct SimReport {
 
     bool airborne = false;
 
+    /// How fast the plate's contact point under the ball is RISING at the end
+    /// of this frame, in m/s along the plate normal.
+    ///
+    /// **The no-pumping quantity.**  Restitution acts on the relative normal
+    /// velocity at the contact point, so a ball arriving at `u` onto a contact
+    /// point rising at `p` leaves at `e u + p (1 + e)`: `p <= 0` bounds the
+    /// apex ratio by `e^2` and a rising plate always adds energy.  While the
+    /// ball is airborne `holdContactDown` constrains the leg command to keep
+    /// this at or below zero, and a positive value here while `airborne` is the
+    /// constraint having been given up to the servo travel or the holdable set.
+    ///
+    /// It is meaningful as a constraint only on a frame the ball ENTERED
+    /// airborne: the frame a separation happens on is one where the ball was on
+    /// the plate when the command was chosen, and the plate may well have been
+    /// rising then — it separated the ball by decelerating away from it, not by
+    /// descending.
+    double contact_normal_rate = 0.0;
+
+    /// The relative normal velocity the ball arrived at, if this frame resolved
+    /// an impact, and zero if it did not.  Negative is approaching.
+    ///
+    /// **The no-pumping measurement.**  `p <= 0` makes each arrival within one
+    /// flight at most `e` times the last, which is the apex ratio `e^2` stated
+    /// in the quantity restitution actually acts on — and the one that survives
+    /// a plate that is itself moving, where a plate-frame apex does not.  See
+    /// `stepBallContact`.
+    double impact_approach = 0.0;
+
     /// The `N/m` this frame's contact was actually decided by, in m/s^2 —
     /// reported by `stepBallContact` rather than reconstructed here.  Positive
     /// held contact, negative ended it, zero means the ball was already flying.

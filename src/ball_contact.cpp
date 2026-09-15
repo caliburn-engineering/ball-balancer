@@ -121,6 +121,11 @@ double quasiStaticNormalAccel(const PlateMotion& plate, double gravity) {
     return gravity * plate.normal().z();
 }
 
+double contactNormalRate(const PlateMotion& plate, const Eigen::Vector3d& s) {
+    const Eigen::Vector3d n = plate.normal();
+    return n.dot(plate.c_dot + plate.omega.cross(plate.R * s));
+}
+
 void worldOf(const BallState& b, const PlateMotion& plate, double ball_radius,
              Eigen::Vector3d* p, Eigen::Vector3d* v) {
     if (b.airborne) {
@@ -170,11 +175,14 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
                           double ball_radius,
                           double gravity,
                           double dt,
-                          double* normal_accel_used) {
+                          double* normal_accel_used,
+                          double* impact_approach) {
     BallState out = b;
     // Zero is the answer for a ball already in flight, and is overwritten by
     // whichever contact branch runs below.
     if (normal_accel_used) *normal_accel_used = 0.0;
+    // Zero means "no impact this frame", which is every frame but the arrivals.
+    if (impact_approach) *impact_approach = 0.0;
 
     if (!out.airborne) {
         // No opinion without trustworthy rates.  Staying in contact is the
@@ -226,18 +234,101 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
     // constant acceleration has a closed form and there is no reason to ask
     // RK4 for an answer that is already written down.
     const Eigen::Vector3d g(0.0, 0.0, -gravity);
+    const BallState open = out;   // the frame as it opened, for the rewind below
+    const double gap_open =
+        plateFrame(open, prev, ball_radius)(2) - ball_radius;
+
     out.flight_p += out.flight_v * dt + 0.5 * g * dt * dt;
     out.flight_v += g * dt;
 
-    // Landed?  Against `now`, the end-of-frame plate — the ball has had its
+    // Arrived?  Against `now`, the end-of-frame plate — the ball has had its
     // whole step and so has the plate, so this asks where they both ended up.
     // Measured in the plate's frame, so a plate that has tilted or heaved up to
     // meet the ball counts as catching it.
-    const Eigen::Matrix<double, 6, 1> q = plateFrame(out, now, ball_radius);
-    if (q(2) <= ball_radius) {
-        out.airborne = false;
-        out.rolling << q(0), q(1), q(3), q(4);   // z and vz are given up here
+    const double gap_close =
+        plateFrame(out, now, ball_radius)(2) - ball_radius;
+    if (gap_close > 0.0) return out;
+
+    // **The impact is somewhere inside this frame, and where exactly matters.**
+    //
+    // Bouncing at the frame boundary instead does not merely blur the answer,
+    // it reverses its sign: the ball is found already BELOW the surface, having
+    // fallen past it since the last sample, so the approach speed read there is
+    // larger than the speed it truly arrived at — by up to `g dt`.  Reflecting
+    // that at `e` gives back more than was brought in, and the sampling pumps
+    // the bounce train instead of damping it.  Measured before this was fixed,
+    // a train started at 1 m/s climbed to a fixed point near 1.3 m/s and never
+    // terminated at all.
+    //
+    // So the crossing is found first.  The gap closes because the ball falls
+    // and because the plate rises, and both are already in these two numbers:
+    // `gap_open` is measured against the plate at the frame's start and
+    // `gap_close` against the plate at its end.  Interpolating linearly between
+    // them errs on the safe side — the true gap is concave under gravity, so
+    // the chord crosses zero no later than the curve does, and the bounce is
+    // taken at or before the real contact, never after it.  The residual is a
+    // slight loss rather than a gain, which is the direction a discretisation
+    // has to err in if the train is to end.
+    //
+    // A ball flush with the plate — `gap_open == 0`, which is exactly how a
+    // ball that has only just separated opens its first airborne frame — makes
+    // the interpolation degenerate, and the sign of the relative normal
+    // velocity is what settles it instead.  A ball that is not moving into the
+    // surface at the frame's open crosses later in the frame, and the end is
+    // the earliest instant there is evidence for; a ball already moving into it
+    // is in contact at the open.
+    const double crossing =
+        (gap_open > 0.0)
+            ? gap_open / (gap_open - gap_close)
+            : (plateFrame(open, prev, ball_radius)(5) < 0.0 ? 0.0 : 1.0);
+    const double t_hit = std::clamp(crossing, 0.0, 1.0) * dt;
+
+    BallState hit = open;
+    hit.flight_p += open.flight_v * t_hit + 0.5 * g * t_hit * t_hit;
+    hit.flight_v += g * t_hit;
+
+    // Read against `now`.  The plate at `t_hit` is strictly between the two
+    // frames and neither is it; `now` is the one the arrival was detected
+    // against, and using the other would let a ball be found touching a plate
+    // that had already moved on.
+    const Eigen::Matrix<double, 6, 1> q = plateFrame(hit, now, ball_radius);
+
+    // `q(5)` is the RELATIVE normal velocity at the contact point — `plateFrame`
+    // subtracts the plate's own motion there before rotating into the plate's
+    // axes — which is the quantity restitution acts on.  Negative is
+    // approaching.
+    const double approach = q(5);
+    const double rebound = -kRestitution * approach;
+    if (impact_approach) *impact_approach = approach;
+
+    // A bounce is a claim about the plate's velocity, exactly as a separation
+    // is, so it is refused on the same grounds and for the same reason: near a
+    // singularity `c_dot` and `omega` are arithmetic rather than physics, and a
+    // rebound built on them would be a launch the mechanism never performed.
+    // Landing is the conservative answer — it is what the ball did before this
+    // model could bounce at all, and it cannot throw anything.
+    if (now.rates_trustworthy && approach < 0.0 &&
+        rebound >= bounceFloorSpeed(gravity, dt)) {
+        // Reflect the normal component of the RELATIVE velocity and leave the
+        // tangential part alone.  Adding `-(1 + e)` times the approach along
+        // the normal does exactly that, and does it to the world velocity
+        // without needing to decompose it: the plate's own contribution
+        // cancels out of the difference.
+        hit.flight_v -= (1.0 + kRestitution) * approach * now.normal();
+
+        // Fly out the rest of the frame under the rebound.
+        const double rest = dt - t_hit;
+        hit.flight_p += hit.flight_v * rest + 0.5 * g * rest * rest;
+        hit.flight_v += g * rest;
+        return hit;
     }
+
+    // The train is over: either the rebound is too small for this frame rate to
+    // represent, or the ball arrived with no approach speed to reflect.  It
+    // rolls on from where it touched down, which is the impact point rather
+    // than wherever the rest of the frame would have carried it.
+    out.airborne = false;
+    out.rolling << q(0), q(1), q(3), q(4);   // z and vz are given up here
     return out;
 }
 

@@ -245,6 +245,81 @@ Eigen::Matrix<double, 6, 1> plateFrame(const BallState& b,
 void worldOf(const BallState& b, const PlateMotion& plate, double ball_radius,
              Eigen::Vector3d* p, Eigen::Vector3d* v);
 
+/// How fast the plate's contact point under the ball is RISING, in m/s along
+/// the plate normal: `n . (c_dot + omega x R s)`.
+///
+/// **This is the `p` of `u_rebound = e u + p (1 + e)`, and its sign is the
+/// whole of whether the loop pumps a bouncing ball or damps one.**  A plate
+/// rising into a falling ball hands it back more than it arrived with, at
+/// `1.94x` the plate's own speed at `e = 0.94`; a plate that is level or
+/// descending at the moment of impact cannot, and the apex ratio is then at
+/// most `e^2` whatever the loop is doing.  It is a hard result rather than a
+/// tuning, which is why it is worth a named function and a report field
+/// instead of being buried inside the bounce.
+///
+/// `s` is the ball's CENTRE in the plate frame, not the point of the surface
+/// beneath it, and the two give the same answer: they differ by `r n`, and
+/// `n . (omega x r n)` is zero.  Taking the centre is what makes this the same
+/// arithmetic `plateFrame` already subtracts out of an airborne ball's
+/// velocity, rather than a second opinion about it.
+double contactNormalRate(const PlateMotion& plate, const Eigen::Vector3d& s);
+
+/// The coefficient of restitution for this ball arriving on this plate.
+///
+/// **Cited, not chosen.**  Chai, Y. et al., "Restitution coefficient of various
+/// particles based on acoustic technology", *J. Phys.: Conf. Ser.* **2557**
+/// 012057 (2023) — a sphere dropped down a guide onto a 304 stainless-steel
+/// base plate, with the intervals between successive impacts timed acoustically
+/// at 48 kHz.  Their POM sphere gives **e = 0.94**.
+///
+/// It applies to *this* ball because the ball already had a material, implicitly
+/// and unavoidably: `kPlateBall` fixes 50 g at a 20 mm radius, which is
+/// `rho = 1492 kg/m^3` — the engineering-polymer range, and emphatically not
+/// steel, aluminium or a hollow shell.  Chai's POM sphere is 1410 kg/m^3.  So
+/// the density argument and the coefficient come from the same place, and
+/// nothing about the ball had to be retuned to accept the number.
+///
+/// **Two extrapolations, recorded rather than glossed.**  Their drop is 200 mm,
+/// so their first impact is about 1.98 m/s, where the separations here are
+/// nearer 0.2 m/s; restitution is velocity-dependent and generally rises as
+/// impact speed falls, so 0.94 is more likely a floor than a ceiling at these
+/// speeds (Schwager & Poeschel, arXiv:1204.0001, record King et al. finding the
+/// dependence explicitly non-monotonic at low speed for POM on steel).  And
+/// their sphere is 14.8 mm across against this one's 40 mm — the same order,
+/// not the same ball.
+///
+/// It lives beside the contact model rather than in `BallParams` because
+/// restitution is a property of the *pair* of materials that meet, not of the
+/// ball on its own.  A different plate would change it without the ball
+/// changing at all.
+inline constexpr double kRestitution = 0.94;
+
+/// The rebound speed below which a bounce is not resolvable at this frame rate,
+/// and the ball is declared landed: `u < g dt / 2`.
+///
+/// **The termination rule is the hard part, not the coefficient.**  Repeated
+/// restitution gives infinitely many bounces in finite time, so something has
+/// to end the train — and the obvious rules are all height or velocity
+/// thresholds picked against the passive bouncing case, which is exactly what
+/// would kill the small deliberate hops a hopping controller commands (#34).
+///
+/// So the rule is not a chosen threshold at all.  A ball rebounding at `u` is
+/// airborne for `2u/g`; below `u = g dt / 2` that whole flight fits inside one
+/// frame, so the next sample already finds the ball back on the plate and the
+/// integrator has nothing to integrate.  Such a bounce is not *small*, it is
+/// *unrepresentable* — the simulation cannot show it whatever it decides.
+///
+/// Two things follow that a chosen threshold would not give.  It scales with
+/// the frame rate rather than with the ball, so a faster simulation resolves
+/// finer bounces instead of inheriting a number tuned at 60 Hz.  And at 60 Hz
+/// it is 0.082 m/s — a 0.34 mm hop, an order below the millimetres the shipped
+/// tuning's own passive hop reaches and further still below anything a
+/// deliberate hop would ask for.  A ball that is genuinely hopping cannot reach
+/// it.
+inline constexpr double bounceFloorSpeed(double gravity, double dt) {
+    return 0.5 * gravity * dt;
+}
+
 /// Advance the ball one frame, changing phase when contact is lost or made.
 ///
 /// Rolling while the plate can still push (`N/m > 0`), ballistic when it
@@ -254,14 +329,39 @@ void worldOf(const BallState& b, const PlateMotion& plate, double ball_radius,
 /// world velocity — including the plate's motion at the contact point, which is
 /// most of it when the legs are slamming.
 ///
-/// The landing is inelastic: the normal component of the approach is absorbed
-/// and the tangential part carries on rolling.
+/// **Arrival is a bounce, at `kRestitution`.**  It is applied to the *relative*
+/// normal velocity at the contact point rather than to the ball's world
+/// velocity, which is the difference between a model and a decoration: a plate
+/// rising into a falling ball throws it harder than it arrived, and a plate
+/// running away softens the landing to nothing.  That same term is what lets a
+/// controller hop the ball on purpose by driving the legs down and then up, and
+/// it is what `holdContactDown` exists to keep the loop from doing by accident.
 ///
-/// Inelastic rather than bouncing, deliberately.  A real ball does bounce, but
-/// a restitution coefficient is a number nobody here has measured, and the
-/// visible behaviour this ticket is about — the ball leaving the plate at all —
-/// does not depend on it.  A bounce would be a second guess stacked on the
-/// first.
+/// **This reverses a call #23 made on purpose, and the words being reversed
+/// are these:** "Inelastic rather than bouncing, deliberately.  A real ball does
+/// bounce, but a restitution coefficient is a number nobody here has measured,
+/// and the visible behaviour this ticket is about — the ball leaving the plate
+/// at all — does not depend on it."  The second clause still stands; the first
+/// stopped being true when the coefficient was measured by somebody else and
+/// cited.  A ball that arrives and sticks reads as a bug in the physics rather
+/// than as a simplification of it, and that is a cost to a demo whose whole
+/// argument is that you can watch the model be right.
+///
+/// **Tangential velocity is carried across the impact unchanged, deliberately.**
+/// A tangential impulse is `mu` times the normal one at most, and its sign and
+/// size depend on the ball's spin at the moment it lands — but this ball has no
+/// spin state to consult.  `RollingBallDynamics` assumes rolling without
+/// slipping, which fixes spin from velocity while the ball is *on* the plate
+/// and says nothing whatever about a ball in flight.  Inventing a tangential
+/// law would therefore be inventing the spin it depends on.  Frictionless in
+/// the tangential direction is the one choice that assumes nothing — and for a
+/// ball that left the plate rolling without slipping it is not even an
+/// assumption, since it keeps that spin through the flight and arrives with a
+/// contact point already at rest.
+///
+/// The train ends when a rebound falls below `bounceFloorSpeed`, at which point
+/// the normal motion is given up and the ball rolls on from where it touched
+/// down.  See that constant for why the floor is derived rather than chosen.
 ///
 /// `normal_accel_used`, if given, receives the `N/m` this frame was decided by
 /// — the number, not a caller's reconstruction of it.  Which value that is
@@ -282,6 +382,19 @@ void worldOf(const BallState& b, const PlateMotion& plate, double ball_radius,
 /// which state and which guard it was evaluated under, and it will differ:
 /// against the end-of-frame ball rather than the start-of-frame one, without
 /// the trust gate, and with a `z` that has to be assumed.
+///
+/// `impact_approach`, if given, receives the RELATIVE normal velocity the ball
+/// arrived at if this frame resolved an impact, and zero if it did not.
+/// Negative is approaching, so a bounce always reports a negative number.
+///
+/// **This is the quantity the no-pumping property is stated in.**
+/// `u_rebound = e u + p (1 + e)`, so `p <= 0` gives `u_rebound <= e u` and
+/// successive arrivals within one flight fall by at least `e` — which is the
+/// apex ratio `e^2` in the form that survives a plate that is itself moving.
+/// A plate-frame apex is not that quantity: a plate descending under a ball
+/// makes the gap grow with no energy going into the ball at all.  Reported
+/// rather than reconstructed for `normal_accel_used`'s reason — it is read at
+/// the sub-frame crossing, which is an instant no caller has.
 BallState stepBallContact(const RollingBallDynamics& dynamics,
                           const BallState& b,
                           const PlateMotion& now,
@@ -290,6 +403,7 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
                           double ball_radius,
                           double gravity,
                           double dt,
-                          double* normal_accel_used = nullptr);
+                          double* normal_accel_used = nullptr,
+                          double* impact_approach = nullptr);
 
 }  // namespace caliburn

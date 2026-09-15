@@ -36,6 +36,13 @@ struct Track {
     /// in the run.  #29 is the ticket about what that costs; the test for it
     /// is `onBuiltAssembly`, in `cascade_fixture.h`.
     bool changed_assembly = false;
+
+    /// Frames the ball spent off the plate.  Tracking a feasible reference
+    /// should never separate it, and since #23 gave the landing a coefficient
+    /// of restitution a separation is no longer a frame or two — it is a
+    /// bounce train of about a second.  So this is worth counting rather than
+    /// inferring from the tracking error.
+    int airborne_frames = 0;
 };
 
 /// `stepSim` — the step the application drives, with the setpoint driven by a
@@ -104,6 +111,7 @@ Track follow(const ModelEntry& e, const Eigen::MatrixXd& K,
 
         r.max_radius = std::max(r.max_radius,
                                 std::hypot(frame.ball_plate(0), frame.ball_plate(1)));
+        if (frame.airborne) ++r.airborne_frames;
         if (!onBuiltAssembly(plate.kinematics(), s.alpha_rad, s.pose))
             r.changed_assembly = true;
         if (t > path.period_s) {          // after one lap, so the start is not counted
@@ -145,7 +153,7 @@ void test_every_offered_setting_keeps_the_ball() {
     const double a_max = cascadePlate(e.params).maxBallAccel();
 
     double worst_radius = 0.0, worst_error = 0.0;
-    int kept = 0;
+    int kept = 0, airborne = 0;
     for (PathShape s : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
         for (double r_mm : {20.0, 60.0, 120.0, kMaxPathRadius * 1000.0}) {
             SetpointPath p;
@@ -165,6 +173,7 @@ void test_every_offered_setting_keeps_the_ball() {
                 // radius cap exists to leave room for.
                 ASSERT_TRUE(t.max_radius < 0.8 * rim);
                 ++kept;
+                airborne += t.airborne_frames;
                 worst_radius = std::max(worst_radius, t.max_radius);
                 worst_error = std::max(worst_error, t.mean_error);
             }
@@ -182,6 +191,18 @@ void test_every_offered_setting_keeps_the_ball() {
     // being thrown wide of one.
     ASSERT_TRUE(worst_radius < 0.24);
     ASSERT_TRUE(worst_error < 0.03);
+    // **And the ball never leaves the plate on any of them.**  This is the
+    // measurement #23's round two was gated on, and it came back empty: the
+    // "3 of 24 settings lose the ball" that held up two sessions was taken
+    // against a plant that answered every corner with a delta function, and
+    // both halves of that are gone — the accelerations are analytic (#23) and
+    // the corners are filleted (#31).  Not one of the 24 settings separates
+    // the ball for a single frame, under any of the three tunings, so the
+    // coefficient of restitution the landing now carries never gets a chance
+    // to matter here.  The claim is worth asserting rather than reporting:
+    // a reference that starts throwing the ball again should fail loudly and
+    // not merely track a little worse.
+    ASSERT_EQ(airborne, 0);
     // 3 shapes x 4 sizes x 2 laps.  Written out rather than counted from the
     // loops, so that an edit to either has to be an edit to both.
     constexpr int kSettings = 3 * 4 * 2;

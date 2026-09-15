@@ -149,6 +149,83 @@ LegCommand legCommand(const TableKinematics& tk,
     return out;
 }
 
+std::array<double, 3> holdContactDown(const TableKinematics& tk,
+                                      const AutoBalanceDesign& d,
+                                      const PlateMotion& plate,
+                                      const std::array<double, 3>& alpha_rad,
+                                      const std::array<double, 3>& cmd_rad,
+                                      const Eigen::Vector3d& ball_s) {
+    // No lag means no map from a command to a rate to correct, and untrusted
+    // rates mean no `J_v` worth inverting.  Both hand the command back.
+    if (d.servo_tau <= 0.0 || !plate.rates_trustworthy) return cmd_rad;
+
+    const Eigen::Vector3d n = plate.normal();
+    const double n_z = n.z();
+    if (!(n_z > 0.0)) return cmd_rad;   // a plate past vertical has no "down"
+
+    // The rate this command produces, through the same servo model the plate is
+    // stepped with — not `(cmd - alpha) / tau` written out again, which is the
+    // UNLIMITED servo and a different machine since #32.
+    const std::array<double, 3> rate =
+        servoRate(alpha_rad, cmd_rad, d.servo_tau, tk.params().alpha_rate_max);
+    const Eigen::Vector3d pose_dot =
+        plate.J_v * Eigen::Vector3d(rate[0], rate[1], rate[2]);
+    const Eigen::Vector3d omega = plate.A * pose_dot.head<2>();
+
+    // `p = n . c_dot + n . (omega x R s)`, split because only the first half is
+    // heave's to move.  The second is what the TILT is doing to the contact
+    // point, and cancelling it is most of the work — a plate leaning over a
+    // ball on its rising side carries that ball up without gaining a
+    // millimetre of height itself.
+    const Eigen::Vector3d r_world = plate.R * ball_s;
+    const double rotational = n.dot(omega.cross(r_world));
+    if (n_z * pose_dot(2) + rotational <= 0.0) return cmd_rad;
+
+    // The heave rate that puts the contact point exactly at rest, and the leg
+    // rates that produce it and nothing else.  Solving `J_v x = (0, 0, dz)`
+    // rather than nudging the legs uniformly is what leaves the tilt rates
+    // alone — see the header.
+    const double z_dot_wanted = -rotational / n_z;
+    const Eigen::Vector3d correction = plate.J_v.fullPivLu().solve(
+        Eigen::Vector3d(0.0, 0.0, z_dot_wanted - pose_dot(2)));
+
+    std::array<double, 3> out{};
+    for (int i = 0; i < kLegs; ++i)
+        out[i] = std::clamp(cmd_rad[i] + d.servo_tau * correction(i),
+                            d.alpha_min_rad, d.alpha_max_rad);
+
+    // **This asks for the rate that is needed and stops there, and stopping
+    // there is the decision.**  `servoRate` clamps at `alpha_rate_max`, so on
+    // the frames the loop is slamming hardest the legs cannot deliver the rate
+    // this asks for and the contact point still rises a little — measured over
+    // the 36 x 24 shove grid, by up to 0.17 m/s in six frames out of some
+    // twenty million, with nothing saturated and nothing clipped.  That is the
+    // servo running out of speed, not the arithmetic being wrong.
+    //
+    // Driving the COMMAND further to force the clamped rate down was tried, as
+    // a march-and-bisect on the heave scale with the clamp inside the search.
+    // It does not work and it is worth saying why: a leg pinned at `rate_max`
+    // does not move faster when its command moves further, so the search finds
+    // no scale that satisfies the constraint and walks the command to the
+    // bottom of the servo travel instead.  The plate is then flat at its floor
+    // with no tilt authority left, and the over-aggressive sweep goes from
+    // losing none of 90 directions to losing all of them.  A constraint the
+    // actuator cannot fill is a saturation to report, not a command to shout.
+    //
+    // And it is a leg command like any other: the travel limits are a box, the
+    // holdable set is not, and `legCommand` retreats into it for the reason #22
+    // and #29 between them establish — a command the plate cannot be HELD at
+    // costs the loop the assembly it is steering in.  Dropped here, the same
+    // sweep loses all 90 and spends 2070 frames on the wrong assembly.  The
+    // retreat scales the triple back toward the level pose, which is HIGHER
+    // than the one being asked for, so it can put back a little of the heave
+    // just removed.  That is the second place the `p <= 0` guarantee is given
+    // up, and `SimReport::contact_normal_rate` is where both of them show.
+    const std::array<double, 3> level = {d.home_leg_rad, d.home_leg_rad,
+                                         d.home_leg_rad};
+    return retreatToHoldable(tk, out, level, kRatesUntrustworthyAbove).alpha_rad;
+}
+
 std::array<double, 3> stepServos(const std::array<double, 3>& alpha_rad,
                                  const std::array<double, 3>& cmd_rad,
                                  double tau,

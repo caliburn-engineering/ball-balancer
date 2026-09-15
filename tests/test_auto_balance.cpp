@@ -467,6 +467,139 @@ void test_a_rate_saturated_leg_has_no_acceleration() {
 }
 
 // ---------------------------------------------------------------------------
+// The no-pumping constraint
+// ---------------------------------------------------------------------------
+//
+// `holdContactDown` is one scalar's worth of control law and the whole of the
+// bounce's stability argument: `u_rebound = e u + p (1 + e)`, so a contact
+// point that never rises can never hand a bouncing ball back more than it
+// arrived with.  These pin it against plates built by hand, where the answer is
+// known; `test_attract_mode` pins that it survives the closed loop.
+
+/// A plate at home with its legs being driven at a chosen rate, assembled the
+/// way `stepSim` assembles one.
+PlateMotion movingPlate(const TableKinematics& tk, const TablePose& pose,
+                        const std::array<double, 3>& alpha,
+                        const std::array<double, 3>& cmd, double tau) {
+    const std::array<double, 3> rate =
+        servoRate(alpha, cmd, tau, tk.params().alpha_rate_max);
+    return plateMotion(tk, pose, alpha, rate, servoAccel(rate, tau,
+                                                         tk.params().alpha_rate_max));
+}
+
+/// How fast a command has the contact point under `s` rising, in m/s.
+double riseUnder(const TableKinematics& tk, const TablePose& pose,
+                 const std::array<double, 3>& alpha,
+                 const std::array<double, 3>& cmd, double tau,
+                 const Eigen::Vector3d& s) {
+    return contactNormalRate(movingPlate(tk, pose, alpha, cmd, tau), s);
+}
+
+// A command that would lift the plate into the ball is lowered until it does
+// not, and a command that is already dropping away is handed straight back.
+void test_the_constraint_binds_only_on_a_rising_contact_point() {
+    const TableParams tp = cascadeMechanism(cascadeModel(getBuiltinModels()).params);
+    const TableKinematics tk(tp);
+    const TablePose pose = tk.home_pose(kHome);
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+    const Eigen::Vector3d s(0.05, 0.0, kBallRadius);
+
+    AutoBalanceDesign d;
+    d.home_leg_rad = kHome;
+    d.servo_tau = 0.05;
+    d.mechanism = tp;
+
+    // All three legs commanded up: pure heave, and the contact point goes with
+    // it.  `plate` is the plate as it stands, which is what `stepSim` hands in.
+    const PlateMotion still = movingPlate(tk, pose, alpha, alpha, d.servo_tau);
+    const std::array<double, 3> up = {kHome + 0.05, kHome + 0.05, kHome + 0.05};
+    ASSERT_TRUE(riseUnder(tk, pose, alpha, up, d.servo_tau, s) > 0.05);
+
+    const std::array<double, 3> held =
+        holdContactDown(tk, d, still, alpha, up, s);
+    ASSERT_TRUE(riseUnder(tk, pose, alpha, held, d.servo_tau, s) <= 0.0);
+    // It gave up the rise and not the whole command: the legs are still being
+    // asked for something, just not for a lift.
+    ASSERT_TRUE(held[0] < up[0]);
+
+    // And a command that already drops the plate is untouched, bit for bit.
+    const std::array<double, 3> down = {kHome - 0.05, kHome - 0.05, kHome - 0.05};
+    const std::array<double, 3> kept =
+        holdContactDown(tk, d, still, alpha, down, s);
+    for (int i = 0; i < 3; ++i) ASSERT_EQ(kept[i], down[i]);
+}
+
+// **Tilt authority is untouched, and exactly so.**  The correction is the leg
+// rate `J_v` maps to pure heave, so `phi_dot` and `theta_dot` — and `omega`
+// with them — come out unchanged.  A uniform `(1, 1, 1)` nudge would have been
+// the obvious reading of "common-mode" and is not the same thing: away from the
+// symmetric pose it tilts the plate as it lifts it.
+void test_the_constraint_leaves_the_tilt_rates_alone() {
+    const TableParams tp = cascadeMechanism(cascadeModel(getBuiltinModels()).params);
+    const TableKinematics tk(tp);
+    const std::array<double, 3> alpha = {kHome + 0.02, kHome - 0.03, kHome + 0.01};
+    const FKResult fk = tk.solve_pose(alpha, tk.home_pose(kHome));
+    ASSERT_TRUE(fk.converged);
+
+    AutoBalanceDesign d;
+    d.home_leg_rad = kHome;
+    d.servo_tau = 0.05;
+    d.mechanism = tp;
+
+    // A command that tilts AND lifts, from an off-centre pose, so that the two
+    // are genuinely mixed in the leg triple.
+    const std::array<double, 3> cmd = {kHome + 0.14, kHome + 0.02, kHome + 0.07};
+    const PlateMotion before = movingPlate(tk, fk.pose, alpha, cmd, d.servo_tau);
+    const Eigen::Vector3d s(0.04, -0.06, kBallRadius);
+    ASSERT_TRUE(contactNormalRate(before, s) > 0.0);
+
+    const std::array<double, 3> held =
+        holdContactDown(tk, d, before, alpha, cmd, s);
+    const PlateMotion after = movingPlate(tk, fk.pose, alpha, held, d.servo_tau);
+
+    // The angular velocity is the same vector, to the precision an LU solve
+    // leaves.  The heave is not.
+    for (int i = 0; i < 3; ++i)
+        ASSERT_NEAR(after.omega(i), before.omega(i), 1e-9);
+    ASSERT_TRUE(after.c_dot(2) < before.c_dot(2) - 0.01);
+    ASSERT_TRUE(contactNormalRate(after, s) <= 1e-9);
+}
+
+// The same flag the contact model refuses a separation on refuses this.  Near a
+// singularity `J_v` is arithmetic rather than physics, and inverting it would be
+// commanding a leg rate to cancel a plate motion nobody can vouch for.
+void test_untrusted_rates_leave_the_command_alone() {
+    const TableParams tp = cascadeMechanism(cascadeModel(getBuiltinModels()).params);
+    const TableKinematics tk(tp);
+    const TablePose pose = tk.home_pose(kHome);
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+    const Eigen::Vector3d s(0.05, 0.0, kBallRadius);
+
+    AutoBalanceDesign d;
+    d.home_leg_rad = kHome;
+    d.servo_tau = 0.05;
+    d.mechanism = tp;
+
+    PlateMotion m = movingPlate(tk, pose, alpha, alpha, d.servo_tau);
+    const std::array<double, 3> up = {kHome + 0.05, kHome + 0.05, kHome + 0.05};
+
+    m.rates_trustworthy = true;
+    ASSERT_TRUE(holdContactDown(tk, d, m, alpha, up, s)[0] < up[0]);
+
+    m.rates_trustworthy = false;
+    const std::array<double, 3> kept = holdContactDown(tk, d, m, alpha, up, s);
+    for (int i = 0; i < 3; ++i) ASSERT_EQ(kept[i], up[i]);
+
+    // And a servo with no lag has no map from a command to a rate to correct.
+    m.rates_trustworthy = true;
+    AutoBalanceDesign lagless = d;
+    lagless.servo_tau = 0.0;
+    const std::array<double, 3> unchanged =
+        holdContactDown(tk, lagless, m, alpha, up, s);
+    for (int i = 0; i < 3; ++i) ASSERT_EQ(unchanged[i], up[i]);
+}
+
+// ---------------------------------------------------------------------------
 // Layer 2: the loop, closed around the nonlinear plate
 // ---------------------------------------------------------------------------
 
@@ -879,6 +1012,9 @@ int main() {
     test_servo_lag_is_first_order();
     test_the_servo_cannot_be_driven_faster_than_its_rate_limit();
     test_a_rate_saturated_leg_has_no_acceleration();
+    test_the_constraint_binds_only_on_a_rising_contact_point();
+    test_the_constraint_leaves_the_tilt_rates_alone();
+    test_untrusted_rates_leave_the_command_alone();
     test_default_weights_balance_the_ball();
     test_default_weights_reject_a_nudge();
     test_setpoint_is_tracked();

@@ -956,13 +956,14 @@ disturbance does slam the legs.  What changed, twice, is that the plate is no
 longer credited with accelerations its servos never produced.
 
 **Distinguish the tuning from the demo here, since they parted company.**  The
-shipped *tuning* can still hop, above about 0.30 m/s, in narrow slivers of
-direction and by fractions of a millimetre — measured but **not pinned**: where
-the tuning starts to let go is a sweep over speed as well as direction, and no
-ticket has yet owned it.  (#31 was named here as its owner and did not take it;
-#29 moved the whole envelope again and is the reason a fresh measurement is
-worth more than this sentence.)  What is pinned is the disturbance the interface
-actually hands out, above.  The shipped *demo*
+shipped *tuning* still hops the ball once the shove is hard enough: swept over
+36 points of the lap and 24 directions against a ball already tracking the
+opening circle, a shove at `kMaxNudgeSpeed` separates it in about one run in
+nine, and the ball bounces for up to three seconds before it settles.  It does
+not lose it — that is what the bound is chosen to make true, and the envelope
+behind it is tabulated at `kMaxNudgeSpeed`, which #23 re-measured and moved from
+0.30 to 0.20 because an elastic ball spends far longer off the plate than an
+inelastic one did.  The shipped *demo*
 does not hop at all, because it no longer kicks the ball: tracing a gentle
 circle never separates it, and
 `test_ten_minutes_unattended_never_loses_the_ball` asserts exactly that — zero
@@ -977,10 +978,128 @@ gravity acts" is a statement about an inertial frame.  Each phase keeps its own
 truth and `plateFrame` converts on demand.
 
 A launch takes the ball's **full** world velocity, including the plate's motion
-at the contact point — which is most of it when the legs are slamming.  Landing
-is inelastic: a real ball bounces, but a restitution coefficient is a number
-nobody here has measured, and the behaviour this exists to show does not depend
-on it.
+at the contact point — which is most of it when the legs are slamming.
+
+**Landing is a bounce, and it used to be inelastic on purpose.**  The words
+being reversed are these: *"a real ball bounces, but a restitution coefficient
+is a number nobody here has measured, and the behaviour this exists to show does
+not depend on it."*  The second clause still stands.  The first stopped being
+true when the coefficient was measured by somebody else: Chai et al., *J. Phys.:
+Conf. Ser.* **2557** 012057 (2023) dropped a POM sphere onto a 304 stainless
+plate and timed the intervals between impacts acoustically at 48 kHz, getting
+**e = 0.94**.  It applies to *this* ball because the ball already had a material
+whether anyone said so or not — `kPlateBall` fixes 50 g at a 20 mm radius, which
+is 1492 kg/m³, and their sphere is 1410 — so nothing about the ball had to be
+retuned to accept the number.  Two extrapolations are on the record rather than
+glossed: their impact is ~1.98 m/s against separations here nearer 0.2, and
+their sphere is 14.8 mm across against this one's 40.
+
+A ball that arrives and sticks reads as a bug in the physics rather than as a
+simplification of it, and that is a cost to a demo whose argument is that you
+can watch the model be right.
+
+Three things had to be decided rather than discovered:
+
+- **Restitution acts on the RELATIVE normal velocity at the contact point**, not
+  on the ball's world velocity.  `plateFrame` already subtracts the plate's own
+  motion there, so a plate rising into a falling ball throws it harder and one
+  running away catches it softly, with no extra arithmetic.  That is the
+  difference between a model and a decoration, and it is the same term a
+  deliberate hop would be built on (#34).
+- **The impact is found INSIDE the frame, and that is not a refinement.**
+  Bouncing at the frame boundary reverses the sign of the discretisation error:
+  the ball is found already *below* the surface, having fallen past it since the
+  last sample, so the approach speed read there exceeds the speed it truly
+  arrived at — by up to `g·dt`.  Reflecting that at `e` returns more than was
+  brought in, and the sampling *pumps* the train.  Measured before it was fixed,
+  a ball dropped 50 mm never terminated in 100 s of simulated time; the fixed
+  point is `e·g·dt/(2(1−e))` = 1.28 m/s, so the train climbs to a bouncier state
+  than it started in and stays there.  Interpolating the gap linearly between
+  the frame's two ends errs the safe way — the true gap is concave under
+  gravity, so the chord crosses zero no later than the curve does.  With it,
+  apex heights decay at `e² = 0.884` to within 0.5% on a still plate, and the
+  residual is the apex being a discrete sample rather than slack in the model.
+- **Tangential velocity carries across unchanged, and the reason is better than
+  "we have no spin state".**  A ball that leaves the plate rolling without
+  slipping keeps its spin through the flight, so on landing its contact point is
+  again at rest: no slip, no friction impulse.  Frictionless in the tangential
+  direction is not an assumption here, it is a consequence of the rolling model.
+
+**The train terminates by becoming unrepresentable, not by hitting a threshold
+anybody picked.**  `e = 0.94` retains 88% of the energy per bounce, so a train
+runs about `e/(1−e) ≈ 16` times the first flight.  `bounceFloorSpeed` ends it at
+`u < g·dt/2`: a rebound at `u` is airborne for `2u/g`, and below that the whole
+flight fits inside one frame.  It scales with the frame rate rather than with
+the ball — halve `dt` and the simulation resolves half the bounce — and at 60 Hz
+it is 0.082 m/s, a 0.34 mm hop.  The requirement that it must not fire on a ball
+that is genuinely hopping is met by construction rather than by margin.
+
+### The loop may not lift the plate into a bouncing ball
+
+`u_rebound = e·u + p(1 + e)`, where `p` is how fast the plate's contact point
+under the ball is rising.  **`p ≤ 0` gives `u_rebound ≤ e·u` — always** — so the
+bounce can never hand back more than it took; a rising plate always adds energy,
+at 1.94× its own speed at `e = 0.94`.  That is a hard result about the impact
+law rather than a tuning, and it is the whole of the airborne control question.
+
+It has to be, because four airborne control laws were measured against the
+72-direction and 24-setting sweeps and all four were worse than or equal to
+doing nothing: `predictedLanding` with the ball's velocity zeroed (what ships),
+the landing point plus the real velocity, `predictedRest`, and keeping the path
+feedforward through the flight.  They were not four control laws.  `K`'s output
+is a leg *triple*, which is simultaneously tilt (differential) and heave
+(common-mode), and those do different jobs while the ball is in the air — tilt
+aims the normal impulse at landing, heave sets its magnitude.  Feeding a single
+target through `K` leaves their relative phase uncontrolled, so all four were
+different ways of saying nothing about `p`.  The worst of them is the incumbent:
+`predictedLanding` collapses onto the ball at every impact and springs out again
+at every rebound, so a bouncing ball hands the loop a target oscillating at the
+bounce frequency, the plate rises about 0.02 m/s into each arrival, and that
+feeds back roughly 5% per impact against the 12% `e²` takes out.
+
+So the loop is handed a constraint instead of a fifth target.  `holdContactDown`
+lowers the leg command until `p ≤ 0`, along the leg-rate direction `J_v` maps to
+**pure heave** — `J_v⁻¹(0, 0, ż)` — so `φ̇`, `θ̇` and `ω` come out bit for bit
+unchanged and tilt authority is untouched.  A uniform `(1, 1, 1)` nudge would
+have been the obvious reading of "common-mode" and is not the same thing away
+from the symmetric pose.  It fails safe: if the constraint bound every frame the
+worst case would be a plate holding still, which is the incumbent best.
+
+**What it is worth, measured.**  Over a 12 × 12 grid of lap points and shove
+directions at `kMaxNudgeSpeed`, with and without it:
+
+| | balls lost / 144 | peak hop | worst arrival growth |
+|---|---|---|---|
+| without | 6, 7, 3 | 1.29 m | 12× |
+| with | 0, 0, 0 | 0.11 m | 1.8× |
+
+**And where the guarantee is given up.**  `holdContactDown` asks for the leg
+rate that cancels the rise and stops there.  Two saturations can keep the plate
+from delivering it — the servo rate limit (#32), and the retreat into the
+holdable set (#29), which scales the whole triple back toward a level pose that
+sits *higher* than the one being asked for.  Over that sweep, frames where the
+contact point rose faster than 10 mm/s, out of every frame the ball entered
+airborne: Nominal 0 of 2344, Aggressive 70 of 5359 (worst +0.296 m/s), Detuned 0
+of 1871.  Aggressive slams the legs hardest, so it is the tuning that runs the
+servo out of speed.
+
+Pushing the command past the rate the servo can deliver was tried and does not
+work: a leg pinned at `rate_max` does not move faster when its command moves
+further, so a search for a scale that satisfies the constraint walks the command
+to the bottom of the servo travel instead.  The plate ends up flat at its floor
+with no tilt authority left, and the over-aggressive sweep goes from losing none
+of 90 directions to losing all of them.  A constraint the actuator cannot fill
+is a saturation to report, not a command to shout — `SimReport::contact_normal_rate`
+is where it is reported.
+
+**It is not asserted as an apex ratio, and the decision record's D10 asked for
+one.**  `e²` bounds the ratio of successive apex *heights* only over a plate
+that holds still.  With the loop running the plate does not hold still: it
+descends under a ball it has just let go of, so the plate-frame gap grows with
+no energy entering the ball at all.  Measured that way the closed-loop sweep
+reports ratios near 2 with `p` pinned to a thousandth of a metre per second,
+which is the metric failing rather than the mechanism.  The still-plate apex
+ratio is pinned in `test_ball_contact`; the closed loop asserts `p` directly.
 
 **Rolling resistance is scaled by that same normal force, not by `g`.**  It is a
 normal-force effect — the contact patch deforms in proportion to how hard the
@@ -1046,11 +1165,21 @@ Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
 
 > **An over-aggressive tuning does not merely overshoot — it takes the ball off
 > the surface.**
-> Q on ball position at 2000 separates the ball in **17 of 720** kick
-> directions, rising 3.5 mm.  Before the ball could leave the plate at all the
-> same tuning looked merely fast, because a glued ball cannot be thrown.  That
-> is the honest ceiling on #19's aggressive preset, and the three tunings the UI
-> offers separate it in none of those 720.
+> Q on ball position at 2000 separates the ball in **every one of 720**
+> directions of this sweep, rising 28.7 mm.  Before the ball could leave the
+> plate at all the same tuning looked merely fast, because a glued ball cannot
+> be thrown.  That is the honest ceiling on #19's aggressive preset, and the
+> three tunings the UI offers separate it in none of those 720.
+>
+> **The count went from 17 to 720 when the landing became a bounce, and not
+> because the gain got worse.**  A separation that lasted one frame became one
+> that lasts seconds, and a one-frame separation was invisible to a sweep that
+> samples `SimReport::airborne` at the frame boundary — the ball was leaving all
+> along.  Which also relocates the cause: the sweep settles the ball from
+> 60, −40 mm before it shoves it, and at Q = 2000 the ball separates on frame 11
+> of that *settling*, the same frame in every direction.  What the 720 counts is
+> the tuning throwing the ball while merely centring it, which is a stronger
+> statement about the gain than the disturbance sweep was making.
 >
 > **Re-measured twice, and the claim has lost a half each time.**  The figures
 > this note first carried — 54 of 720, "launches reaching 689 mm" — were the
