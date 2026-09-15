@@ -759,12 +759,14 @@ void test_the_nudge_buttons_cannot_compose_past_the_bound() {
 // for one.**  `e^2` bounds the ratio of successive apex HEIGHTS only over a
 // plate that holds still, which is how the bounce was validated in
 // `test_apexes_decay_at_e_squared_on_a_still_plate`.  With the loop running the
-// plate does not hold still: it descends under a ball it has just let go of, so
-// the gap grows with no energy entering the ball at all, and a plate-frame apex
-// ratio measures the plate's retreat rather than the bounce.  Measured that way
-// this sweep reports ratios near 2 with `p` pinned to a thousandth of a metre
-// per second, which is the metric failing rather than the mechanism.  So the
-// mechanism is asserted directly.
+// plate does not hold still, and D8 is the reason: forbidden to rise, it
+// descends under a ball it has just let go of, so the gap grows with no energy
+// entering the ball at all.  Measured that way this sweep reports ratios near 2
+// with `p` pinned to a thousandth of a metre per second — the metric is
+// confounded by the very decision it sits beside.  So the mechanism is asserted
+// directly, and D10's own secondary measures come with it as UPPER bounds:
+// a loop that pumped would show it in bounce count and airborne frames, and
+// those are pinned both ways rather than only used to prove the sweep is live.
 //
 // **Where the guarantee is given up, and by how much.**  `holdContactDown` asks
 // for the leg rate that cancels the rise and stops there; two things can keep
@@ -787,21 +789,32 @@ void test_the_loop_never_pumps_a_bouncing_ball() {
     const auto& e = cascadeModel(models);
     const SimPlate plate = cascadePlate(e.params);
 
+    // **The allowances are pinned ON the measurement, not widened past it.**
+    // Aggressive's 70 frames and 0.296 m/s are the servo's rate limit binding,
+    // and a bound at twice either number would be an exemption rather than a
+    // pin — it would let the residual double before anything failed.  10% of
+    // headroom is for the arithmetic.
     struct Tuning {
         const char* name;
         Eigen::MatrixXd K;
         int allowed_rising;    ///< frames the contact point may rise on
         double worst_rise;     ///< [m/s] and by no more than this
+        int max_bounces;       ///< and the train stays this short
+        int max_airborne;
     };
     Tuning tunings[] = {
-        {"Nominal", defaultGain(e), 0, 0.01},
-        {"Aggressive", gainForPreset(e, presetNamed("Aggressive")), 140, 0.35},
-        {"Detuned", gainForPreset(e, presetNamed("Detuned")), 0, 0.01},
+        {"Nominal", defaultGain(e), 0, 0.01, 700, 2600},
+        {"Aggressive", gainForPreset(e, presetNamed("Aggressive")), 78, 0.33,
+         1400, 5900},
+        {"Detuned", gainForPreset(e, presetNamed("Detuned")), 0, 0.01, 620, 2100},
     };
+
+    const double home_z = plate.kinematics()
+                              .home_pose(cascadeHomeLegAngle(e.params)).z_c;
 
     for (Tuning& t : tunings) {
         int separated = 0, airborne = 0, rising = 0, impacts = 0, unended = 0;
-        double worst_rise = 0.0;
+        double worst_rise = 0.0, lowest_plate = home_z, end_of_run_z = home_z;
         for (int i = 0; i < 12; ++i) {
             for (int j = 0; j < 12; ++j) {
                 SimInput in;
@@ -834,8 +847,17 @@ void test_the_loop_never_pumps_a_bouncing_ball() {
                         worst_rise = std::max(worst_rise, f.contact_normal_rate);
                     }
                     if (f.impact_approach < 0.0) ++impacts;
-                    if (f.airborne) { ever = true; ++airborne; }
+                    if (f.airborne) {
+                        ever = true;
+                        ++airborne;
+                        // **D8's recorded risk, measured rather than assumed.**
+                        // "The plate descends at separation BECAUSE it
+                        // accelerated away from the ball, so forbidding it to
+                        // rise for a ~1 s train may strand it low and tilted."
+                        lowest_plate = std::min(lowest_plate, s.pose.z_c);
+                    }
                     was_airborne = f.airborne;
+                    if (k + 1 == total) end_of_run_z = s.pose.z_c;
 
                     // The ball stays on the plate throughout, which is the
                     // claim `kMaxNudgeSpeed` is chosen to make.
@@ -857,6 +879,22 @@ void test_the_loop_never_pumps_a_bouncing_ball() {
 
         ASSERT_TRUE(rising <= t.allowed_rising);
         ASSERT_TRUE(worst_rise < t.worst_rise);
+
+        // And the symptoms, as ceilings.  A loop that fed a train would show it
+        // here first — more impacts, and longer in the air — so these fail
+        // loudly rather than merely drifting.  Measured: 630 / 2344 under
+        // Nominal, 1251 / 5359 under Aggressive, 548 / 1871 under Detuned.
+        ASSERT_TRUE(airborne <= t.max_airborne);
+        ASSERT_TRUE(impacts <= t.max_bounces);
+
+        // **The risk D8 recorded did not bite.**  The plate drops 30.6 mm under
+        // Nominal and 45.1 mm under Aggressive from a 212.1 mm home height, and
+        // it is back at that height at the end of every run — so "stranded low"
+        // is a dip of a fifth of the travel, not a floor the loop cannot climb
+        // off.  Both halves are asserted: a plate that ran out of room and a
+        // plate that never came back are different failures.
+        ASSERT_TRUE(lowest_plate > home_z - 0.060);
+        ASSERT_NEAR(end_of_run_z, home_z, 1e-3);
     }
 }
 

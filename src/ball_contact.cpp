@@ -175,14 +175,12 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
                           double ball_radius,
                           double gravity,
                           double dt,
-                          double* normal_accel_used,
-                          double* impact_approach) {
+                          ContactReport* report) {
     BallState out = b;
-    // Zero is the answer for a ball already in flight, and is overwritten by
-    // whichever contact branch runs below.
-    if (normal_accel_used) *normal_accel_used = 0.0;
-    // Zero means "no impact this frame", which is every frame but the arrivals.
-    if (impact_approach) *impact_approach = 0.0;
+    // Zeroed first: a ball already in flight is pressed by nothing, and "no
+    // impact this frame" is every frame but the arrivals.  Both are overwritten
+    // by whichever branch below applies.
+    if (report) *report = ContactReport{};
 
     if (!out.airborne) {
         // No opinion without trustworthy rates.  Staying in contact is the
@@ -199,7 +197,7 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
         // separation built entirely from the rates the guard exists to refuse.
         if (!now.rates_trustworthy || !prev.rates_trustworthy) {
             const double N_qs = quasiStaticNormalAccel(now, gravity);
-            if (normal_accel_used) *normal_accel_used = N_qs;
+            if (report) report->normal_accel = N_qs;
             out.rolling = stepBall(dynamics, out.rolling, pose, N_qs, dt);
             return out;
         }
@@ -208,7 +206,7 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
                                                      ball_radius),
                                      Eigen::Vector2d(out.rolling(2), out.rolling(3)),
                                      gravity);
-        if (normal_accel_used) *normal_accel_used = N;
+        if (report) report->normal_accel = N;
         if (N > 0.0) {
             // The same N that decided the ball is still touching also says how
             // hard it is pressed, and rolling resistance is a normal-force
@@ -299,7 +297,7 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
     // approaching.
     const double approach = q(5);
     const double rebound = -kRestitution * approach;
-    if (impact_approach) *impact_approach = approach;
+    if (report) report->impact_approach = approach;
 
     // A bounce is a claim about the plate's velocity, exactly as a separation
     // is, so it is refused on the same grounds and for the same reason: near a

@@ -197,9 +197,12 @@ void test_every_offered_setting_keeps_the_ball() {
     // against a plant that answered every corner with a delta function, and
     // both halves of that are gone — the accelerations are analytic (#23) and
     // the corners are filleted (#31).  Not one of the 24 settings separates
-    // the ball for a single frame, under any of the three tunings, so the
+    // the ball for a single frame, so the
     // coefficient of restitution the landing now carries never gets a chance
-    // to matter here.  The claim is worth asserting rather than reporting:
+    // to matter here.  Swept out of tree under Aggressive and Detuned as well,
+    // with the same answer — but this test runs Nominal, because Nominal is the
+    // tuning D11 says must hold every setting the sliders offer.  The claim is
+    // worth asserting rather than reporting:
     // a reference that starts throwing the ball again should fail loudly and
     // not merely track a little worse.
     ASSERT_EQ(airborne, 0);

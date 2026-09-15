@@ -191,9 +191,12 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
 
     // --- 6. The ball ---
     if (in.ball_enabled) {
+        ContactReport contact;
         s.ball = stepBallContact(plate.rolling(), s.ball, s.motion,
                                  s.motion_prev, s.pose, r_ball, g, in.dt,
-                                 &out.normal_accel, &out.impact_approach);
+                                 &contact);
+        out.normal_accel = contact.normal_accel;
+        out.impact_approach = contact.impact_approach;
     }
     out.airborne = s.ball.airborne;
     out.ball_plate = plateFrame(s.ball, s.motion, r_ball);

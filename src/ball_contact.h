@@ -363,38 +363,50 @@ inline constexpr double bounceFloorSpeed(double gravity, double dt) {
 /// the normal motion is given up and the ball rolls on from where it touched
 /// down.  See that constant for why the floor is derived rather than chosen.
 ///
-/// `normal_accel_used`, if given, receives the `N/m` this frame was decided by
-/// — the number, not a caller's reconstruction of it.  Which value that is
-/// depends on the branch taken, and that is the point of reporting it:
+/// What a frame's contact did, beyond where it left the ball.
 ///
-///   - **In contact, rates believed:** `normalAccel` against the ball's state
-///     at the frame's START, which is where the ball was when the plate was
-///     either still pressing it or not.  Positive held contact; negative ended
-///     it, and is the frame the ball left on.
-///   - **In contact, rates not believed:** `quasiStaticNormalAccel`, which is
-///     what actually scaled the rolling resistance — the tilt is trustworthy
-///     when the rates are not, so it is the part of the answer that survives.
-///   - **Already in flight:** zero.  A plate touching nothing presses with
-///     nothing.
+/// Both numbers were computed inside the step anyway, and both are read at
+/// instants no caller has: `normal_accel` under a particular ball state and a
+/// particular trust gate, `impact_approach` at the sub-frame crossing.
+/// Recomputing either outside is a second opinion, and it will differ.
 ///
-/// Anything measuring the margin the plate is holding the ball by has to ask
-/// for it here.  Recomputing `normalAccel` outside is a second opinion about
-/// which state and which guard it was evaluated under, and it will differ:
-/// against the end-of-frame ball rather than the start-of-frame one, without
-/// the trust gate, and with a `z` that has to be assumed.
-///
-/// `impact_approach`, if given, receives the RELATIVE normal velocity the ball
-/// arrived at if this frame resolved an impact, and zero if it did not.
-/// Negative is approaching, so a bounce always reports a negative number.
-///
-/// **This is the quantity the no-pumping property is stated in.**
-/// `u_rebound = e u + p (1 + e)`, so `p <= 0` gives `u_rebound <= e u` and
-/// successive arrivals within one flight fall by at least `e` — which is the
-/// apex ratio `e^2` in the form that survives a plate that is itself moving.
-/// A plate-frame apex is not that quantity: a plate descending under a ball
-/// makes the gap grow with no energy going into the ball at all.  Reported
-/// rather than reconstructed for `normal_accel_used`'s reason — it is read at
-/// the sub-frame crossing, which is an instant no caller has.
+/// They travel together because they are asked for together — `SimReport`
+/// already carried them side by side — and one out-parameter is one fewer
+/// place for a caller to pass them in the wrong order.
+struct ContactReport {
+    /// The `N/m` this frame was decided by, in m/s^2.  Which value it is
+    /// depends on the branch taken, and that is the point of reporting it:
+    ///
+    ///   - **In contact, rates believed:** `normalAccel` against the ball's
+    ///     state at the frame's START, which is where the ball was when the
+    ///     plate was either still pressing it or not.  Positive held contact;
+    ///     negative ended it, and is the frame the ball left on.
+    ///   - **In contact, rates not believed:** `quasiStaticNormalAccel`, which
+    ///     is what actually scaled the rolling resistance — the tilt is
+    ///     trustworthy when the rates are not, so it is the part of the answer
+    ///     that survives.
+    ///   - **Already in flight:** zero.  A plate touching nothing presses with
+    ///     nothing.
+    ///
+    /// Anything measuring the margin the plate is holding the ball by has to
+    /// ask for it here.
+    double normal_accel = 0.0;
+
+    /// The RELATIVE normal velocity the ball arrived at if this frame resolved
+    /// an impact, and zero if it did not.  Negative is approaching.
+    ///
+    /// **What it is for.**  The impulse reflects this at `kRestitution`, so the
+    /// relative rebound is `e` times it by construction; what `p <= 0` buys is
+    /// the same bound in the WORLD, where `u_rebound = e u + p (1 + e)` and the
+    /// ball is what has to end up slower.  Successive arrivals are a different
+    /// quantity again and are NOT bounded by `e`: a plate that descends during
+    /// the flight lets the ball fall further, so the next arrival can be faster
+    /// than the last departure with no energy having entered the ball at all.
+    /// That is the same reason a plate-frame apex ratio is not the mechanism —
+    /// see `test_the_loop_never_pumps_a_bouncing_ball`.
+    double impact_approach = 0.0;
+};
+
 BallState stepBallContact(const RollingBallDynamics& dynamics,
                           const BallState& b,
                           const PlateMotion& now,
@@ -403,7 +415,6 @@ BallState stepBallContact(const RollingBallDynamics& dynamics,
                           double ball_radius,
                           double gravity,
                           double dt,
-                          double* normal_accel_used = nullptr,
-                          double* impact_approach = nullptr);
+                          ContactReport* report = nullptr);
 
 }  // namespace caliburn

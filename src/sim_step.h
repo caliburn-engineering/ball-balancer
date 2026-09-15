@@ -263,11 +263,11 @@ struct SimReport {
     /// The relative normal velocity the ball arrived at, if this frame resolved
     /// an impact, and zero if it did not.  Negative is approaching.
     ///
-    /// **The no-pumping measurement.**  `p <= 0` makes each arrival within one
-    /// flight at most `e` times the last, which is the apex ratio `e^2` stated
-    /// in the quantity restitution actually acts on — and the one that survives
-    /// a plate that is itself moving, where a plate-frame apex does not.  See
-    /// `stepBallContact`.
+    /// **Where the no-pumping property is observable.**  It says which frames
+    /// the bounce law ran on, so a test can check `contact_normal_rate` at the
+    /// instants that actually matter rather than over every airborne frame.
+    /// It is NOT a quantity `e` bounds between successive impacts — see
+    /// `ContactReport::impact_approach` for why not.
     double impact_approach = 0.0;
 
     /// The `N/m` this frame's contact was actually decided by, in m/s^2 —

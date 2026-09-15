@@ -202,6 +202,20 @@ struct Retreat {
     bool safe_was_unholdable;
 };
 
+/// `retreatToHoldable` with the safe end every leg COMMAND has: the level pose.
+///
+/// Two call sites want exactly this — the loop's own command and the
+/// constrained one `holdContactDown` hands back — and they wanted it in the
+/// same four lines, which is four lines of "which safe end, and which condition
+/// limit" stated twice.  The level pose always assembles and sits at a
+/// condition number of 4.7, so the search always has an answer; the limit is
+/// `kRatesUntrustworthyAbove`, the same line the application's own Jacobian
+/// readout turns red at.
+std::array<double, 3> commandRetreatedToHoldable(const TableKinematics& tk,
+                                                 const AutoBalanceDesign& d,
+                                                 const std::array<double, 3>& cmd_rad,
+                                                 bool* retreated = nullptr);
+
 Retreat retreatToHoldable(const TableKinematics& tk,
                           const std::array<double, 3>& target,
                           const std::array<double, 3>& safe,
@@ -296,6 +310,15 @@ Eigen::Vector2d predictedLanding(const Eigen::Matrix<double, 6, 1>& ball_plate,
 ///
 /// `ball_s` is the ball's centre in the plate frame, the same point
 /// `contactNormalRate` is defined at.
+///
+/// **It lives with the controller rather than with the contact model**, which
+/// is why this header reaches for `PlateMotion`.  It reads the plate all the
+/// way through and could sit beside `contactNormalRate` on that argument alone
+/// — but what it produces is a leg COMMAND, it has to retreat that command into
+/// the holdable set exactly as `legCommand` does, and it is a decision about
+/// what the loop should do rather than a fact about the plant.  Putting it in
+/// `ball_contact` would point the plant at the controller to borrow
+/// `retreatToHoldable`, which is the dependency the wrong way round.
 std::array<double, 3> holdContactDown(const TableKinematics& tk,
                                       const AutoBalanceDesign& d,
                                       const PlateMotion& plate,
@@ -422,6 +445,22 @@ Eigen::VectorXd defaultLqrInputWeights(int m);
 /// the last speed BELOW the first of them rather than the last clean row.
 /// That is the same reading that put it at 0.3 against the old table, applied
 /// to the new one.
+///
+/// **D11 alone would allow 0.24, and the reason it is not is #19.**  The
+/// contract is that Nominal must hold every setting the sliders offer while
+/// Aggressive is allowed to lose the ball — "a trap is a loss the visitor did
+/// not ask for; a lesson is one they did" — and Nominal is clean through 0.24,
+/// with only Aggressive's single direction at 0.22 in the way.  Read that way
+/// the bound is set by the wrong row.
+///
+/// It stays at 0.20 because #19 made a second promise at this very constant:
+/// `test_aggressive_is_no_more_fragile_than_the_shipped_tuning` asserts that
+/// Aggressive survives `kMaxNudgeSpeed` from every direction, and that is what
+/// makes offering the tuning behind a button honest.  Setting the bound where
+/// Aggressive is known to lose a sliver would leave that assertion passing only
+/// because its grid is coarser than the one the sliver was found on.  Raising
+/// it to 0.24 is therefore a product decision — drop #19's comparison, or
+/// exempt Aggressive from it — rather than a consequence of the table.
 ///
 /// **What the constraint is worth, at the bound.**  Without `holdContactDown`
 /// the same grid at 0.20 loses 6, 7 and 3 of 144, throws the ball up to 1.29 m

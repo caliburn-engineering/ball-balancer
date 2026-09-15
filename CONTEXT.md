@@ -1025,6 +1025,15 @@ Three things had to be decided rather than discovered:
   again at rest: no slip, no friction impulse.  Frictionless in the tangential
   direction is not an assumption here, it is a consequence of the rolling model.
 
+**Three words, and they are not synonyms.**  An **impact** is one contact
+between a flying ball and the plate: the instant the bounce law runs, reported
+as `ContactReport::impact_approach`.  An **arrival** is the ball coming down
+onto an impact — the relative normal speed it brings.  A **landing** is the end
+of the whole train, when the rebound falls under `bounceFloorSpeed` and the ball
+goes back to rolling.  A separation produces one landing and as many impacts as
+the train has bounces, so "the ball landed" and "the ball hit the plate" say
+different things and the code says whichever it means.
+
 **The train terminates by becoming unrepresentable, not by hitting a threshold
 anybody picked.**  `e = 0.94` retains 88% of the energy per bounce, so a train
 runs about `e/(1−e) ≈ 16` times the first flight.  `bounceFloorSpeed` ends it at
@@ -1033,73 +1042,6 @@ flight fits inside one frame.  It scales with the frame rate rather than with
 the ball — halve `dt` and the simulation resolves half the bounce — and at 60 Hz
 it is 0.082 m/s, a 0.34 mm hop.  The requirement that it must not fire on a ball
 that is genuinely hopping is met by construction rather than by margin.
-
-### The loop may not lift the plate into a bouncing ball
-
-`u_rebound = e·u + p(1 + e)`, where `p` is how fast the plate's contact point
-under the ball is rising.  **`p ≤ 0` gives `u_rebound ≤ e·u` — always** — so the
-bounce can never hand back more than it took; a rising plate always adds energy,
-at 1.94× its own speed at `e = 0.94`.  That is a hard result about the impact
-law rather than a tuning, and it is the whole of the airborne control question.
-
-It has to be, because four airborne control laws were measured against the
-72-direction and 24-setting sweeps and all four were worse than or equal to
-doing nothing: `predictedLanding` with the ball's velocity zeroed (what ships),
-the landing point plus the real velocity, `predictedRest`, and keeping the path
-feedforward through the flight.  They were not four control laws.  `K`'s output
-is a leg *triple*, which is simultaneously tilt (differential) and heave
-(common-mode), and those do different jobs while the ball is in the air — tilt
-aims the normal impulse at landing, heave sets its magnitude.  Feeding a single
-target through `K` leaves their relative phase uncontrolled, so all four were
-different ways of saying nothing about `p`.  The worst of them is the incumbent:
-`predictedLanding` collapses onto the ball at every impact and springs out again
-at every rebound, so a bouncing ball hands the loop a target oscillating at the
-bounce frequency, the plate rises about 0.02 m/s into each arrival, and that
-feeds back roughly 5% per impact against the 12% `e²` takes out.
-
-So the loop is handed a constraint instead of a fifth target.  `holdContactDown`
-lowers the leg command until `p ≤ 0`, along the leg-rate direction `J_v` maps to
-**pure heave** — `J_v⁻¹(0, 0, ż)` — so `φ̇`, `θ̇` and `ω` come out bit for bit
-unchanged and tilt authority is untouched.  A uniform `(1, 1, 1)` nudge would
-have been the obvious reading of "common-mode" and is not the same thing away
-from the symmetric pose.  It fails safe: if the constraint bound every frame the
-worst case would be a plate holding still, which is the incumbent best.
-
-**What it is worth, measured.**  Over a 12 × 12 grid of lap points and shove
-directions at `kMaxNudgeSpeed`, with and without it:
-
-| | balls lost / 144 | peak hop | worst arrival growth |
-|---|---|---|---|
-| without | 6, 7, 3 | 1.29 m | 12× |
-| with | 0, 0, 0 | 0.11 m | 1.8× |
-
-**And where the guarantee is given up.**  `holdContactDown` asks for the leg
-rate that cancels the rise and stops there.  Two saturations can keep the plate
-from delivering it — the servo rate limit (#32), and the retreat into the
-holdable set (#29), which scales the whole triple back toward a level pose that
-sits *higher* than the one being asked for.  Over that sweep, frames where the
-contact point rose faster than 10 mm/s, out of every frame the ball entered
-airborne: Nominal 0 of 2344, Aggressive 70 of 5359 (worst +0.296 m/s), Detuned 0
-of 1871.  Aggressive slams the legs hardest, so it is the tuning that runs the
-servo out of speed.
-
-Pushing the command past the rate the servo can deliver was tried and does not
-work: a leg pinned at `rate_max` does not move faster when its command moves
-further, so a search for a scale that satisfies the constraint walks the command
-to the bottom of the servo travel instead.  The plate ends up flat at its floor
-with no tilt authority left, and the over-aggressive sweep goes from losing none
-of 90 directions to losing all of them.  A constraint the actuator cannot fill
-is a saturation to report, not a command to shout — `SimReport::contact_normal_rate`
-is where it is reported.
-
-**It is not asserted as an apex ratio, and the decision record's D10 asked for
-one.**  `e²` bounds the ratio of successive apex *heights* only over a plate
-that holds still.  With the loop running the plate does not hold still: it
-descends under a ball it has just let go of, so the plate-frame gap grows with
-no energy entering the ball at all.  Measured that way the closed-loop sweep
-reports ratios near 2 with `p` pinned to a thousandth of a metre per second,
-which is the metric failing rather than the mechanism.  The still-plate apex
-ratio is pinned in `test_ball_contact`; the closed loop asserts `p` directly.
 
 **Rolling resistance is scaled by that same normal force, not by `g`.**  It is a
 normal-force effect — the contact patch deforms in proportion to how hard the
@@ -1192,6 +1134,77 @@ Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
 > mode underneath it, the same defect the aggressive preset's sweep was failing
 > on. What survives is the part that was always about the gain: it lets go of
 > the ball, and a sensible tuning does not.
+
+### The loop may not lift the plate into a bouncing ball
+
+`u_rebound = e·u + p(1 + e)`, where `p` is how fast the plate's contact point
+under the ball is rising.  **`p ≤ 0` gives `u_rebound ≤ e·u` — always** — so the
+bounce can never hand back more than it took; a rising plate always adds energy,
+at 1.94× its own speed at `e = 0.94`.  That is a hard result about the impact
+law rather than a tuning, and it is the whole of the airborne control question.
+
+It has to be, because four airborne control laws were measured against the
+72-direction and 24-setting sweeps and all four were worse than or equal to
+doing nothing: `predictedLanding` with the ball's velocity zeroed (what ships),
+the landing point plus the real velocity, `predictedRest`, and keeping the path
+feedforward through the flight.  They were not four control laws.  `K`'s output
+is a leg *triple*, which is simultaneously tilt (differential) and heave
+(common-mode), and those do different jobs while the ball is in the air — tilt
+aims the normal impulse at landing, heave sets its magnitude.  Feeding a single
+target through `K` leaves their relative phase uncontrolled, so all four were
+different ways of saying nothing about `p`.  The worst of them is the incumbent:
+`predictedLanding` collapses onto the ball at every impact and springs out again
+at every rebound, so a bouncing ball hands the loop a target oscillating at the
+bounce frequency, the plate rises about 0.02 m/s into each arrival, and that
+feeds back roughly 5% per impact against the 12% `e²` takes out.
+
+So the loop is handed a constraint instead of a fifth target.  `holdContactDown`
+lowers the leg command until `p ≤ 0`, along the leg-rate direction `J_v` maps to
+**pure heave** — `J_v⁻¹(0, 0, ż)` — so `φ̇`, `θ̇` and `ω` come out bit for bit
+unchanged and tilt authority is untouched.  A uniform `(1, 1, 1)` nudge would
+have been the obvious reading of "common-mode" and is not the same thing away
+from the symmetric pose.  It fails safe: if the constraint bound every frame the
+worst case would be a plate holding still, which is the incumbent best.
+
+**What it is worth, measured.**  Over a 12 × 12 grid of lap points and shove
+directions at `kMaxNudgeSpeed`, with and without it:
+
+| | balls lost / 144 | peak hop | worst arrival growth |
+|---|---|---|---|
+| without | 6, 7, 3 | 1.29 m | 12× |
+| with | 0, 0, 0 | 0.11 m | 1.8× |
+
+**And where the guarantee is given up.**  `holdContactDown` asks for the leg
+rate that cancels the rise and stops there.  Two saturations can keep the plate
+from delivering it — the servo rate limit (#32), and the retreat into the
+holdable set (#29), which scales the whole triple back toward a level pose that
+sits *higher* than the one being asked for.  Over that sweep, frames where the
+contact point rose faster than 10 mm/s, out of every frame the ball entered
+airborne: Nominal 0 of 2344, Aggressive 70 of 5359 (worst +0.296 m/s), Detuned 0
+of 1871.  Aggressive slams the legs hardest, so it is the tuning that runs the
+servo out of speed.
+
+Pushing the command past the rate the servo can deliver was tried and does not
+work: a leg pinned at `rate_max` does not move faster when its command moves
+further, so a search for a scale that satisfies the constraint walks the command
+to the bottom of the servo travel instead.  The plate ends up flat at its floor
+with no tilt authority left, and the over-aggressive sweep goes from losing none
+of 90 directions to losing all of them.  A constraint the actuator cannot fill
+is a saturation to report, not a command to shout — `SimReport::contact_normal_rate`
+is where it is reported.
+
+**It is not asserted as an apex ratio, and the decision record's D10 asked for
+one.**  `e²` bounds the ratio of successive apex *heights* only over a plate
+that holds still.  With the loop running the plate does not hold still: it
+descends under a ball it has just let go of, so the plate-frame gap grows with
+no energy entering the ball at all.  Measured that way the closed-loop sweep
+reports ratios near 2 with `p` pinned to a thousandth of a metre per second,
+which is the metric failing rather than the mechanism.  The still-plate apex
+ratio is pinned in `test_ball_contact`; the closed loop asserts `p` directly.
+
+Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23),
+against the reasoning recorded as D8, D9 and D10 in
+`docs/plans/2026-09-09-bouncing-ball-control-decisions.md`.
 
 ### Trajectory tracking
 
