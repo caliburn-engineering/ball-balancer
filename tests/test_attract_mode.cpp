@@ -829,6 +829,7 @@ void test_the_loop_never_pumps_a_bouncing_ball() {
                 const double theta = j * M_PI / 6.0;
 
                 bool was_airborne = false, ever = false;
+                double last_energy = 0.0;
                 for (int k = 0; k < total; ++k) {
                     if (k == at && !s.ball.airborne) {
                         s.ball.rolling(2) += kMaxNudgeSpeed * std::cos(theta);
@@ -856,6 +857,41 @@ void test_the_loop_never_pumps_a_bouncing_ball() {
                         // rise for a ~1 s train may strand it low and tilted."
                         lowest_plate = std::min(lowest_plate, s.pose.z_c);
                     }
+                    // **The independent half of the no-pumping claim.**
+                    //
+                    // Everything above reads `p` — and `p` is computed by the
+                    // same `contactNormalRate` the bounce consumes, so a wrong
+                    // `p` would satisfy the assertion and throw the ball
+                    // anyway.  This measures the ball instead, in the world,
+                    // and touches none of that code.
+                    //
+                    // The ball's specific energy is `g z + |v|^2 / 2`.  Gravity
+                    // is conservative, so it is CONSTANT through a flight
+                    // whatever the plate does; the only thing that can change
+                    // it is an impact.  An impact reverses the normal relative
+                    // velocity at `e <= 1` onto a contact point rising at
+                    // `p <= 0`, which leaves `|v_n|` no larger and the
+                    // tangential part untouched.  So within one flight the
+                    // energy must never rise — and it is sampled at frame
+                    // boundaries with no sub-frame subtlety, precisely because
+                    // free flight conserves it.
+                    if (f.airborne) {
+                        Eigen::Vector3d wp, wv;
+                        worldOf(s.ball, s.motion, kBallRadius, &wp, &wv);
+                        const double energy =
+                            plate.gravity() * wp.z() + 0.5 * wv.squaredNorm();
+                        if (was_airborne) {
+                            // 1e-12 is round-off and nothing else.  The worst
+                            // rise anywhere in this sweep is 8.9e-16 — two ULP
+                            // on an energy of about 2 J/kg — against a pumping
+                            // loop, which moves this by whole percent.  The
+                            // bound is a thousand times the noise and a
+                            // billionth of a real failure.
+                            ASSERT_TRUE(energy <= last_energy + 1e-12);
+                        }
+                        last_energy = energy;
+                    }
+
                     was_airborne = f.airborne;
                     if (k + 1 == total) end_of_run_z = s.pose.z_c;
 
