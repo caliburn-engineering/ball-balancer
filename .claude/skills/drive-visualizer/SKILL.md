@@ -1,9 +1,9 @@
 ---
 name: drive-visualizer
-description: Launch, focus, click and screenshot the linear-analyzer visualizer GUI on Hyprland/Wayland. Use when verifying a UI change in the app, taking screenshots of panels, or driving the app to a specific state.
+description: Launch, focus, click and screenshot the Ball-Balancer visualizer GUI on Hyprland/Wayland. Use when verifying a UI change in the app, taking screenshots of panels, or driving the app to a specific state.
 ---
 
-# Driving the linear-analyzer visualizer
+# Driving the Ball-Balancer visualizer
 
 Desktop GLFW/OpenGL app. On this machine (Hyprland + Wayland) it is driven with
 `hyprctl` for focus, `ydotool` for input, and `grim` for screenshots.
@@ -26,7 +26,7 @@ Then launch from the repo root — the app reads `imgui.ini` and `vendor/fonts/`
 relative to cwd, and opens on the *active* workspace, so the order matters.
 
 ```bash
-cd projects/linear-analyzer
+cd projects/ball-balancer
 setsid ./build/visualizer >/tmp/viz.log 2>&1 &
 sleep 4
 ```
@@ -39,6 +39,9 @@ hyprctl dispatch "hl.dsp.focus({window='address:$A'})"
 hyprctl dispatch "hl.dsp.window.move({workspace='3'})"
 ```
 
+The window title is `Ball-Balancer — Caliburn` since the merge (issue #13);
+`Linear System Analyzer` no longer matches anything.
+
 Finally park the pointer on workspace 3 (see **Click**) so the human can see at
 a glance that the agent is driving.
 
@@ -48,7 +51,7 @@ a glance that the agent is driving.
 A=$(hyprctl clients -j | python3 -c "
 import json,sys
 for c in json.load(sys.stdin):
-    if 'Linear System' in c.get('title',''):
+    if 'Ball-Balancer' in c.get('title',''):
         print(c['address'])")
 ```
 
@@ -85,11 +88,25 @@ argument in `hl.dispatch(...)`.
 coordinates: window `at` + pixel offset within the screenshot.
 
 ```bash
-ydotool mousemove -a -x <X> -y <Y>; sleep 0.3; ydotool click 0xC0
+hyprctl dispatch "hl.dsp.cursor.move({x=<X>, y=<Y>})"; sleep 0.4
+hyprctl dispatch "hl.dsp.cursor.move({x=<X>, y=<Y>})"; sleep 0.4
+hyprctl cursorpos          # confirm the warp landed before committing to a click
+ydotool click 0xC0
 ```
 
 `0xC0` is press+release of the left button. Re-focus the window before each
 click burst if you ran anything that may have stolen focus.
+
+**Warp twice.** A single warp followed immediately by a click has the press
+arrive while ImGui still believes the pointer is where it was, and the release
+at the new position turns the whole thing into a *drag* — which silently
+rearranges the dock layout, moves floating windows, and edits whatever slider
+was under the old position. The symptom is a click that "did nothing" plus a
+layout that quietly changed. The second warp gives ImGui a frame to catch up.
+
+`ydotool mousemove -x <dx> -y <dy>` (relative) is no substitute: pointer
+acceleration scales the delta, so the cursor does not land where the arithmetic
+says it will.
 
 ## Screenshot
 
@@ -105,10 +122,25 @@ mostly plots you are not checking. Then read the PNG.
 - **A blank or unchanged screenshot after a click usually means focus, not a
   code bug.** Re-check `hyprctl activewindow -j` before concluding anything.
 - The window may be tiled small. It resizes when it is the only tiled client.
-- The bundled `NotoSans-Regular.ttf` has **no arrow or math-operator glyphs** —
-  U+2190 (left arrow), U+2220, U+221E all render as a hollow box, even though
-  `visualizer.cpp` lists those ranges in `glyph_ranges`. Greek renders fine.
-  Use ASCII (`<-`, `->`) in UI strings; do not add arrows expecting them to draw.
+- **A hollow box has two different causes, and they need different fixes.**
+  Measured against the bundled `NotoSans-Regular.ttf` (issue #15):
+
+  | Block | In the font | Verdict |
+  |---|---|---|
+  | Arrows U+2190-21FF | 0 / 112 | Write ASCII: `<-`, `->` |
+  | Mathematical Operators U+2200-22FF | 1 / 256 (only U+2212 MINUS) | Write ASCII: `inf`, `arg`, `~=` |
+  | General Punctuation U+2000-206F | 111 / 112 | Fine — the range is requested |
+  | Phonetic Extensions U+1D00-1D7F | 128 / 128 | Fine — the range is requested |
+  | Greek, super/subscripts, Latin-1 | covered | Fine |
+
+  So: a glyph the **font** lacks can never be made to draw, and must be
+  rewritten in ASCII. A glyph the font has but `glyph_ranges` in
+  `visualizer.cpp` does not **request** boxes just as convincingly, and is
+  fixed by adding the range. Em dash and bullet were the second kind and drew
+  as boxes in 15 UI strings until #15.
+
+  To check a candidate character before using it, read the TTF's `cmap`
+  rather than guessing.
 - Watch for **C++ hex-escape greediness** in UI strings: `"\xcf\x84f"` is parsed
   as `\xcf` then `\x84f` (out of range), not `tau` + `f`. Split the literal:
   `"\xcf\x84" "f"`.

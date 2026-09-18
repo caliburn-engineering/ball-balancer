@@ -1,9 +1,73 @@
 // src/analysis/model_library.cpp
 #include "model_library.h"
+
+// The cascade model reads its mechanism block from the same kinematics the
+// 3D view draws, rather than carrying a transcribed copy of the Jacobian.
+#include "table_kinematics.h"
+
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <sstream>
 
 namespace caliburn {
+
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+}
+
+namespace {
+
+// The cascade's parameter list, read by symbol.  By symbol and not by index:
+// the list is edited by hand and a reordered entry would otherwise silently
+// swap two physical quantities.
+double cascadeParam(const std::vector<PhysicalParam>& params,
+                    const char* symbol, double fallback) {
+    for (const auto& p : params)
+        if (p.symbol == symbol) return static_cast<double>(p.value);
+    return fallback;
+}
+
+// The servo travel the mechanism is built with.  Fixed rather than exposed:
+// they are the hardware's limits, not a design choice, and the plate view and
+// the model have to agree on them for a saturating command to mean anything.
+constexpr double kAlphaMin = 10.0 * kPi / 180.0;
+constexpr double kAlphaMax = 80.0 * kPi / 180.0;
+
+}  // namespace
+
+bool isCascadeModel(const ModelEntry& entry) {
+    return entry.name.rfind("Ball-Balancer Cascade", 0) == 0;
+}
+
+TableParams cascadeMechanism(const std::vector<PhysicalParam>& params) {
+    TableParams tp;
+    tp.R_ground  = cascadeParam(params, "Rg", 0.300);
+    tp.R_table   = cascadeParam(params, "Rt", 0.300);
+    tp.L1        = cascadeParam(params, "L1", 0.150);
+    tp.L2        = cascadeParam(params, "L2", 0.150);
+    tp.alpha_min = kAlphaMin;
+    tp.alpha_max = kAlphaMax;
+    return tp;
+}
+
+double cascadeGravity(const std::vector<PhysicalParam>& params) {
+    return cascadeParam(params, "g", 9.81);
+}
+
+double cascadeServoTau(const std::vector<PhysicalParam>& params) {
+    return std::max(1e-3, cascadeParam(params, "\xcf\x84", 0.05));
+}
+
+double cascadeHomeLegAngle(const std::vector<PhysicalParam>& params) {
+    return cascadeParam(params, "a0", 45.0) * kPi / 180.0;
+}
+
+int defaultModelIndex(const std::vector<ModelEntry>& models) {
+    for (std::size_t i = 0; i < models.size(); ++i)
+        if (models[i].name == "Ball-Balancer Cascade") return static_cast<int>(i);
+    return 0;
+}
 
 std::optional<Eigen::MatrixXd> parseMatrix(const std::string& text) {
     std::vector<std::vector<double>> rows;
@@ -248,7 +312,7 @@ std::vector<ModelEntry> getBuiltinModels() {
              "For a solid sphere, I = (2/5)\xc2\xb7m\xc2\xb7r\xc2\xb2:\n"
              "  (m + 2m/5)\xc2\xb7" "a = m\xc2\xb7g\xc2\xb7sin(\xce\xb8)\n"
              "  (7/5)\xc2\xb7" "a = g\xc2\xb7sin(\xce\xb8)\n\n"
-             "Linearize for small angles (sin\xce\xb8 \xe2\x89\x88 \xce\xb8):\n"
+             "Linearize for small angles (sin\xce\xb8 ~= \xce\xb8):\n"
              "  x'' = (5g/7)\xc2\xb7\xce\xb8y     (tilt about y moves ball in x)\n"
              "  y'' = (5g/7)\xc2\xb7\xce\xb8x     (tilt about x moves ball in y)"},
 
@@ -276,7 +340,150 @@ std::vector<ModelEntry> getBuiltinModels() {
     }
 
     // =====================================================================
-    // 4. Inverted Pendulum on Cart
+    // 4. Ball-Balancer Cascade (legs -> plate -> ball)
+    // =====================================================================
+    //
+    // The plant the product is actually about.  Model 3 takes plate tilt as
+    // its input, which is not a thing anyone can command: the real actuators
+    // are three servo-driven legs, and the tilt they produce is the *middle*
+    // of the chain.  This model spans the whole chain, so a controller
+    // designed against it commands what the hardware exposes.
+    //
+    // The mechanism block is not transcribed here.  It is read from the same
+    // TableKinematics the 3D view draws, at the same home pose, so the model
+    // and the picture cannot disagree — and the geometry sliders propagate
+    // into the controller design rather than only into the rendering.
+    {
+        ModelEntry entry;
+        entry.name = "Ball-Balancer Cascade";
+        entry.description = "Legs -> plate -> ball, 7 states, 3 in, 5 out";
+
+        entry.params = {
+            {"Gravity",          "g",             "m/s\xc2\xb2", 9.81f,  1.0f,  20.0f, false},
+            {"Servo lag",        "\xcf\x84",      "s",           0.05f,  0.01f,  0.50f, true},
+            {"Ground radius",    "Rg",            "m",           0.300f, 0.10f,  0.60f, false},
+            {"Table radius",     "Rt",            "m",           0.300f, 0.10f,  0.60f, false},
+            {"Lower leg",        "L1",            "m",           0.150f, 0.05f,  0.40f, false},
+            {"Upper leg",        "L2",            "m",           0.150f, 0.05f,  0.40f, false},
+            {"Home leg angle",   "a0",            "deg",        45.0f,  20.0f,  70.0f, false},
+        };
+
+        entry.builder = [](const std::vector<PhysicalParam>& p) -> LinearSystem {
+            const double g     = cascadeGravity(p);
+            const double tau   = cascadeServoTau(p);
+            const double a0    = cascadeHomeLegAngle(p);
+            constexpr double k = 5.0 / 7.0;  // solid sphere rolling factor
+
+            // Not transcribed here: the same function the application hands to
+            // the plate, so the mechanism the gain is designed against and the
+            // one it is checked against cannot be two different tables.
+            const TableKinematics tk(cascadeMechanism(p));
+            const TablePose home = tk.home_pose(a0);
+            Eigen::Matrix3d Jv = tk.velocity_jacobian({a0, a0, a0}, home);
+
+            // A geometry the sliders can reach but the mechanism cannot close
+            // makes J_pose singular, and the solve returns infinities.  Fall
+            // back to a decoupled unit map rather than handing NaN to the
+            // Riccati solver, which would fail with a mystifying message.
+            if (!Jv.allFinite()) Jv = Eigen::Matrix3d::Identity();
+
+            LinearSystem sys;
+            sys.A = Eigen::MatrixXd::Zero(7, 7);
+            sys.B = Eigen::MatrixXd::Zero(7, 3);
+            sys.C = Eigen::MatrixXd::Zero(5, 7);
+            sys.D = Eigen::MatrixXd::Zero(5, 3);
+
+            // States 0..2: leg angle deviation from home, first-order servo.
+            for (int i = 0; i < 3; ++i) {
+                sys.A(i, i) = -1.0 / tau;
+                sys.B(i, i) =  1.0 / tau;
+            }
+
+            // States 3..6: ball [x, y, vx, vy] in the plate frame.
+            sys.A(3, 5) = 1.0;
+            sys.A(4, 6) = 1.0;
+
+            // Tilt reaches the ball through the mechanism.  Pitch (row 1 of
+            // Jv) drives x; roll (row 0) drives y with a sign flip, because
+            // R = Ry(theta)*Rx(phi) lifts the +Y edge as phi grows.  Same
+            // convention as ballTiltFromPose — see CONTEXT.md.
+            for (int j = 0; j < 3; ++j) {
+                sys.A(5, j) =  k * g * Jv(1, j);
+                sys.A(6, j) = -k * g * Jv(0, j);
+            }
+
+            // Outputs: roll, pitch, heave, then ball x and y.
+            sys.C.block(0, 0, 3, 3) = Jv;
+            sys.C(3, 3) = 1.0;
+            sys.C(4, 4) = 1.0;
+            return sys;
+        };
+        entry.system = entry.builder(entry.params);
+
+        entry.derivation = {
+            {"Physical System",
+             "A 3-RRS parallel mechanism: three servo-driven legs support a\n"
+             "circular table with three degrees of freedom \xe2\x80\x94 roll (\xcf\x86), pitch\n"
+             "(\xce\xb8) and heave (z). A ball rolls freely on the table.\n\n"
+             "The legs are the only actuators. Plate tilt is not commanded\n"
+             "directly; it is what the leg angles produce. Model 3 starts at\n"
+             "the tilt and so describes a plant nobody can drive \xe2\x80\x94 this one\n"
+             "starts at the leg commands, which is what the hardware takes."},
+
+            {"Mechanism Kinematics",
+             "Leg angles and table pose are tied by three loop-closure\n"
+             "constraints, f(\xce\xb1, p) = 0, with p = [\xcf\x86, \xce\xb8, z]. Implicit\n"
+             "differentiation gives the map from leg motion to pose motion:\n\n"
+             "  J_pose\xc2\xb7\xce\xb4p + J_\xce\xb1\xc2\xb7\xce\xb4\xce\xb1 = 0\n"
+             "  \xce\xb4p = -J_pose\xe2\x81\xbb\xc2\xb9\xc2\xb7J_\xce\xb1\xc2\xb7\xce\xb4\xce\xb1 = Jv\xc2\xb7\xce\xb4\xce\xb1\n\n"
+             "Jv is evaluated once at the home pose (all legs at \xce\xb1\xe2\x82\x80) and is\n"
+             "fully coupled: every leg moves all three pose axes. Its\n"
+             "condition number is the Jacobian Analysis readout in the Plate\n"
+             "Control panel \xe2\x80\x94 near a singularity the plant loses authority\n"
+             "over one pose direction and the design degrades with it."},
+
+            {"Servo Dynamics",
+             "Each leg is a position-commanded servo with first-order lag:\n\n"
+             "  \xce\xb4\xce\xb1\xe1\xb5\xa2' = (1/\xcf\x84)\xc2\xb7(\xce\xb4\xce\xb1\xe1\xb5\xa2,cmd - \xce\xb4\xce\xb1\xe1\xb5\xa2)\n\n"
+             "Without this the leg angle would be an algebraic input, the\n"
+             "mechanism would contribute no states, and there would be nothing\n"
+             "for a state-feedback design to act on. The lag is also what\n"
+             "makes an aggressive tuning saturate rather than track."},
+
+            {"Ball Dynamics",
+             "A solid sphere rolling without slip on an incline:\n\n"
+             "  (m + I/r\xc2\xb2)\xc2\xb7" "a = m\xc2\xb7g\xc2\xb7sin(\xce\xb8),  I = (2/5)m\xc2\xb7r\xc2\xb2\n"
+             "  (7/5)\xc2\xb7" "a = g\xc2\xb7sin(\xce\xb8)\n\n"
+             "Linearised for small angles:\n\n"
+             "  x'' = +(5g/7)\xc2\xb7\xce\xb8      (pitch runs the ball along +x)\n"
+             "  y'' = -(5g/7)\xc2\xb7\xcf\x86      (roll runs the ball along -y)\n\n"
+             "The sign on \xcf\x86 is not cosmetic. The table rotation is\n"
+             "R = Ry(\xce\xb8)\xc2\xb7Rx(\xcf\x86), so a positive \xcf\x86 LIFTS the +y edge and the\n"
+             "ball runs downhill the other way. Getting it wrong yields a\n"
+             "model that compiles, simulates, and rolls uphill."},
+
+            {"Cascade / State-Space Form",
+             "Substituting \xce\xb4p = Jv\xc2\xb7\xce\xb4\xce\xb1 into the ball equations couples the\n"
+             "two halves without adding pose states \xe2\x80\x94 pose is algebraic in \xce\xb4\xce\xb1.\n\n"
+             "States:  [\xce\xb4\xce\xb1\xe2\x82\x81, \xce\xb4\xce\xb1\xe2\x82\x82, \xce\xb4\xce\xb1\xe2\x82\x83, x, y, x', y']\n"
+             "Inputs:  [\xce\xb4\xce\xb1\xe2\x82\x81,cmd, \xce\xb4\xce\xb1\xe2\x82\x82,cmd, \xce\xb4\xce\xb1\xe2\x82\x83,cmd]\n"
+             "Outputs: [\xcf\x86, \xce\xb8, z, x, y]\n\n"
+             "  A = [ -I/\xcf\x84        0    0 ]   B = [ I/\xcf\x84 ]\n"
+             "      [    0         0    I ]       [  0  ]\n"
+             "      [ M\xc2\xb7Jv         0    0 ]       [  0  ]\n\n"
+             "  M = (5g/7)\xc2\xb7[ +row\xe2\x82\x81(Jv) ; -row\xe2\x82\x80(Jv) ]\n\n"
+             "  C = [ Jv   0   0 ]           D = 0\n"
+             "      [ 0    I   0 ]\n\n"
+             "Three servo poles at -1/\xcf\x84 and four at the origin: the ball is a\n"
+             "double integrator in each axis and will never settle on its own.\n"
+             "Controllable from three legs, so LQR has a stabilising solution."},
+        };
+
+        models.push_back(std::move(entry));
+    }
+
+    // =====================================================================
+    // 5. Inverted Pendulum on Cart
     // =====================================================================
     {
         ModelEntry entry;
@@ -323,7 +530,7 @@ std::vector<ModelEntry> getBuiltinModels() {
              "  (M+m)\xc2\xb7x'' + m\xc2\xb7l\xc2\xb7\xce\xb8''\xc2\xb7" "cos\xce\xb8 - m\xc2\xb7l\xc2\xb7\xce\xb8'\xc2\xb2\xc2\xb7sin\xce\xb8 = F\n"
              "  m\xc2\xb7l\xc2\xb7x''\xc2\xb7" "cos\xce\xb8 + m\xc2\xb7l\xc2\xb2\xc2\xb7\xce\xb8'' - m\xc2\xb7g\xc2\xb7l\xc2\xb7sin\xce\xb8 = 0\n\n"
              "Linearize about \xce\xb8=0 (upright):\n"
-             "  cos\xce\xb8 \xe2\x89\x88 1, sin\xce\xb8 \xe2\x89\x88 \xce\xb8, \xce\xb8'\xc2\xb2 \xe2\x89\x88 0\n\n"
+             "  cos\xce\xb8 ~= 1, sin\xce\xb8 ~= \xce\xb8, \xce\xb8'\xc2\xb2 ~= 0\n\n"
              "  (M+m)\xc2\xb7x'' + m\xc2\xb7l\xc2\xb7\xce\xb8'' = F\n"
              "  x'' + l\xc2\xb7\xce\xb8'' = g\xc2\xb7\xce\xb8\n\n"
              "Solve for accelerations:\n"
@@ -357,7 +564,7 @@ std::vector<ModelEntry> getBuiltinModels() {
     }
 
     // =====================================================================
-    // 5. Quarter-Car Suspension
+    // 6. Quarter-Car Suspension
     // =====================================================================
     {
         ModelEntry entry;
@@ -444,7 +651,7 @@ std::vector<ModelEntry> getBuiltinModels() {
     }
 
     // =====================================================================
-    // 6. Double Mass-Spring-Damper
+    // 7. Double Mass-Spring-Damper
     // =====================================================================
     {
         ModelEntry entry;

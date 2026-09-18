@@ -1,7 +1,7 @@
 // src/analysis/loop_diagnostics.h
 #pragma once
 
-#include "../linear_system.h"
+#include "linear_system.h"
 #include "controller_builders.h"
 
 #include <Eigen/Core>

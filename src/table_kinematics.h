@@ -1,0 +1,368 @@
+#pragma once
+
+#include <Eigen/Dense>
+#include <array>
+#include <optional>
+#include <cmath>
+
+/// The fastest a leg can be driven, in rad/s — the mechanism's default, and
+/// the value `TableParams::alpha_rate_max` opens on.
+///
+/// **Cited, not chosen.**  0.1 s per 60 deg is the speed a high-torque digital
+/// servo delivers, and that is the class a 600 mm table on 150 mm legs would
+/// actually be built from.  60 deg in 0.1 s is 10.47 rad/s.  Written as the
+/// arithmetic rather than as 10.5 so the number on screen and the servo it
+/// comes from cannot drift apart.
+///
+/// Why the plant needs it at all: `stepServos` models a servo as a first-order
+/// lag, and **a first-order lag has unbounded initial rate**.  A real servo does
+/// not.  The missing property showed up as plate heave acceleration with
+/// nothing bounding it, which is the quantity that decides whether the ball
+/// separates.  Decided in D6/D7 of
+/// `docs/plans/2026-09-09-bouncing-ball-control-decisions.md`; see
+/// [#32](https://github.com/caliburn-engineering/caliburn/issues/32).
+///
+/// It engages at `|cmd - alpha| > rate * tau`, which against the shipped
+/// tau = 0.05 s is 30 deg of leg error exactly — a saturated kick recovery or
+/// the Aggressive preset, not a 250 mm/s corner.  The corner is #31's.
+inline constexpr double kServoRateMax = (60.0 * M_PI / 180.0) / 0.1;
+
+/// Is `rate_max` a limit worth enforcing?
+///
+/// Non-positive would freeze the legs rather than slow them and infinite is the
+/// absence of one, so both read as "unlimited".  Shared rather than restated,
+/// because the integrator (`stepServos`) and the derivatives (`servoRate`,
+/// `servoAccel`) all have to agree about what an absent limit is, and two
+/// copies of a predicate in two translation units is how they would stop.
+inline bool rateLimited(double rate_max) {
+    return rate_max > 0.0 && std::isfinite(rate_max);
+}
+
+/// Parameters defining the 3-RRS parallel mechanism geometry
+struct TableParams {
+    double R_ground;    // Ground circle radius [m]
+    double R_table;     // Table circle radius [m]
+    double L1;          // Lower leg length [m]
+    double L2;          // Upper leg length [m]
+    double alpha_min;   // Minimum servo angle [rad] (≈ 10°)
+    double alpha_max;   // Maximum servo angle [rad] (≈ 80°)
+    double gamma_offset = 0.0; // Angular offset between ground and table triads [rad]
+
+    /// Maximum leg rate [rad/s].  A servo property, so it sits beside the
+    /// travel limits rather than in the controller — see `kServoRateMax`, which
+    /// says where the number comes from.  Defaulted rather than set at each
+    /// construction site, unlike the travel limits, so that a harness which
+    /// builds a `TableParams` cannot accidentally build one with an infinitely
+    /// fast servo.
+    double alpha_rate_max = kServoRateMax;
+};
+
+/// Table pose: roll (phi), pitch (theta), heave (z_c)
+struct TablePose {
+    double phi;     // Roll about X-axis [rad]
+    double theta;   // Pitch about Y-axis [rad]
+    double z_c;     // Table center height [m]
+};
+
+/// Result of inverse kinematics
+struct IKResult {
+    std::array<double, 3> alpha;  // Servo angles [rad]
+    bool feasible;                // All solutions exist and within limits
+};
+
+/// Result of forward kinematics
+struct FKResult {
+    TablePose pose;
+    int iterations;
+    double residual_norm;
+    bool converged;
+};
+
+/// The velocity Jacobian's condition number above which this mechanism stops
+/// being believed.  The application's existing "Poor" line, reused rather than
+/// invented: a second threshold for the same thing would be a second opinion
+/// about when this mechanism is in trouble.
+///
+/// Three subsystems read it, which is why it lives beside the Jacobian rather
+/// than in any one of them: `plateMotion` stops vouching for its rates above
+/// it (#23), `maxBallAccel` sizes the corner fillet by the furthest tilt that
+/// stays under it (#31), and `legCommand` will not steer the plate past it at
+/// all (#29).
+inline constexpr double kRatesUntrustworthyAbove = 20.0;
+
+class TableKinematics {
+public:
+    explicit TableKinematics(const TableParams& params);
+
+    // --- Geometry ---
+
+    /// Ground attachment point for leg i (i = 0, 1, 2)
+    Eigen::Vector3d ground_point(int i) const;
+
+    /// Radial unit vector at leg i (points outward from center)
+    Eigen::Vector3d radial_dir(int i) const;
+
+    /// Tangent unit vector at leg i (servo axis, tangent to ground circle)
+    Eigen::Vector3d tangent_dir(int i) const;
+
+    /// Angular position of leg i on the ground circle [rad]
+    double beta(int i) const;
+
+    /// Angular position of leg i on the table circle [rad]
+    double gamma(int i) const;
+
+    // --- Knee Positions ---
+
+    /// Knee position given servo angle (simplified: L1 in radial-vertical plane)
+    Eigen::Vector3d knee_position(int i, double alpha_i) const;
+
+    // --- Table Attachment Points ---
+
+    /// Table attachment point in table-local frame
+    Eigen::Vector3d table_point_local(int i) const;
+
+    /// Table rotation matrix from local to world: Ry(theta) * Rx(phi)
+    Eigen::Matrix3d table_rotation(double phi, double theta) const;
+
+    /// The orientation's time derivative, given the pose and its rates.
+    ///
+    /// Public because the contact model needs it: whether a ball stays on the
+    /// plate is a question about how the surface MOVES, and a rotation matrix
+    /// alone cannot answer it.
+    Eigen::Matrix3d table_rotation_dot(double phi, double theta,
+                                       double phi_dot, double theta_dot) const;
+
+    /// Table attachment point in world frame
+    Eigen::Vector3d table_point_world(int i, const TablePose& pose) const;
+
+    // --- Inverse Kinematics (closed-form) ---
+
+    /// Solve for servo angles given desired table pose.
+    /// Returns nullopt if any leg has no geometric solution.
+    IKResult inverse_kinematics(const TablePose& pose) const;
+
+    /// Solve IK for a single leg. Returns up to 2 solutions.
+    /// Picks the one within [alpha_min, alpha_max], or nearest.
+    std::optional<double> inverse_kinematics_leg(int i, const TablePose& pose) const;
+
+    /// Check if a table pose is reachable (all IK solutions exist and within limits)
+    bool is_feasible(const TablePose& pose) const;
+
+    // --- Forward Kinematics (Newton-Raphson) ---
+
+    /// Solve for table pose given servo angles.
+    /// x0 is the initial guess. Uses Newton-Raphson iteration.
+    FKResult forward_kinematics(const std::array<double, 3>& alpha,
+                                 const TablePose& x0,
+                                 int max_iter = 20,
+                                 double tol = 1e-10) const;
+
+    /// The level pose for a leg triple: `home_pose` of their mean angle.
+    ///
+    /// The seed every forward solve falls back to, and the safe end of every
+    /// retreat.  It was written out at six call sites before it had a name.
+    TablePose level_pose(const std::array<double, 3>& alpha) const;
+
+    /// Can the mechanism be assembled at this leg triple at all?
+    ///
+    /// The servo travel limits are a box and the workspace is not — barely
+    /// half the box has an assembly — so a per-leg clamp can ask for a
+    /// configuration that does not exist.
+    bool can_assemble(const std::array<double, 3>& alpha) const;
+
+    /// Forward kinematics that stays on the assembly the machine is built in.
+    ///
+    /// `forward_kinematics` is a Newton solver, and the constraint equations
+    /// have two roots.  Beside the built assembly — table above its knees —
+    /// there is a FOLDED one with the table lying flat on the base, and for
+    /// `R_ground == R_table` with `L1 == L2` that folded root is exact:
+    /// `z_c = 0` satisfies every leg's length constraint to machine precision
+    /// at every servo angle.  A residual norm cannot tell the two apart, so a
+    /// converged solve is not by itself an answer about a mechanism.
+    ///
+    /// This warm-starts from `seed` for the two-iteration convergence a 60 Hz
+    /// loop wants, then checks which root it landed on.  If it is the folded
+    /// one — because the seed was already folded, or because a hard manoeuvre
+    /// carried the pose down through the knee plane — it re-solves from the
+    /// analytic level pose, which is on the built assembly by construction.
+    ///
+    /// Returns `converged = false` when no built assembly exists for `alpha`
+    /// at all.  That is a real case, not a solver failure: the servo travel
+    /// limits are a box and the workspace is not, so a per-leg clamp can ask
+    /// for a configuration the mechanism cannot make.  Callers should keep the
+    /// pose they had — a mechanism driven into a singularity binds and stops,
+    /// it does not lie flat.
+    ///
+    /// See [#22](https://github.com/caliburn-engineering/caliburn/issues/22).
+    FKResult solve_pose(const std::array<double, 3>& alpha,
+                        const TablePose& seed) const;
+
+    /// The heave a pose has to clear to be the built assembly rather than the
+    /// folded one: a tenth of the mean height of the three knees.
+    ///
+    /// A tenth looks arbitrary and is not.  The folded assembly is not a
+    /// family of poses — it is exactly one, `(phi, theta, z_c) = (0, 0, 0)`,
+    /// at every servo angle, because a table sitting concentric on the base is
+    /// exactly `L2` from each knee when `R_ground == R_table` and
+    /// `L1 == L2`.  So the floor is separating a population from a single
+    /// point at the origin, and the only way to get it wrong is to set it high
+    /// enough to reject something real.
+    ///
+    /// Measured, over 300k samples of the servo box, against assemblies
+    /// verified by round-tripping the pose back through closed-form IK: the
+    /// built population's median sits at 1.98 mean knee heights and its
+    /// minimum at 0.163, with 35 of 142301 below 0.5.  Those are near-singular
+    /// configurations with the table close to its own knee plane, and they are
+    /// real.  A floor at the full mean knee height would have thrown away
+    /// every one of them; at a tenth, the lowest clears by 1.6x and the folded
+    /// root still has to climb from nothing.
+    ///
+    /// Both ends are pinned by `test_assembly_mode`, so a parameter change
+    /// that moves either population fails loudly rather than quietly eroding
+    /// the margin.
+    double assembly_floor(const std::array<double, 3>& alpha) const;
+
+    /// FK residual: f_i = ||P_i - K_i||^2 - L2^2
+    Eigen::Vector3d fk_residual(const std::array<double, 3>& alpha,
+                                 const TablePose& pose) const;
+
+    /// FK Jacobian: J_ij = df_i / dx_j, x = [phi, theta, z_c]
+    Eigen::Matrix3d fk_jacobian(const std::array<double, 3>& alpha,
+                                 const TablePose& pose) const;
+
+    // --- Velocity Jacobian ---
+
+    /// Constraint Jacobian w.r.t. servo angles: J_alpha(i,i) = df_i/d(alpha_i)
+    /// Diagonal matrix (each constraint depends on only one servo)
+    Eigen::Matrix3d constraint_jacobian_alpha(const std::array<double, 3>& alpha,
+                                               const TablePose& pose) const;
+
+    /// Derivative of knee position w.r.t. servo angle
+    Eigen::Vector3d dKnee_dAlpha(int i, double alpha_i) const;
+
+    /// Velocity Jacobian: d(pose)/dt = J_v * d(alpha)/dt
+    /// Maps servo velocities to table pose velocities.
+    /// J_v = -J_pose^{-1} * J_alpha
+    Eigen::Matrix3d velocity_jacobian(const std::array<double, 3>& alpha,
+                                       const TablePose& pose) const;
+
+    // --- Singularity Analysis ---
+
+    /// Manipulability index: sqrt(det(J_v * J_v^T))
+    /// Zero at singularity, higher = better omnidirectional control
+    double manipulability(const std::array<double, 3>& alpha,
+                          const TablePose& pose) const;
+
+    /// Condition number of velocity Jacobian (sigma_max / sigma_min)
+    /// 1 = isotropic (ideal), infinity = singular
+    double condition_number(const std::array<double, 3>& alpha,
+                            const TablePose& pose) const;
+
+    /// Can the mechanism be assembled here, AND believed here?
+    ///
+    /// `can_assemble` asks the weaker question — does a built assembly exist
+    /// at all — and existence is not enough to command a plate to.  Near a
+    /// direct-kinematics singularity two built assemblies approach each other,
+    /// meet, and swap; the velocity Jacobian degenerates between them, and a
+    /// pose marched through that meeting comes out on the OTHER assembly with
+    /// the plate mirrored about it.  The assembly floor cannot see it: both
+    /// modes stand well clear of the folded root, and measured at one triple
+    /// this plate reaches under the aggressive tuning they sit at 153 mm and
+    /// 75 mm of heave with residuals of 1e-12.  See #29.
+    ///
+    /// So the set a command may be steered into is this one rather than the
+    /// workspace: assemblable, and conditioned enough that the rates out of
+    /// the Jacobian are ones this repository already says it believes.
+    ///
+    /// Strictly under `condition_limit`, the same comparison
+    /// `max_conditioned_tilt` and `plateMotion` make, so that an infinite
+    /// condition number fails rather than passing by comparing false.
+    bool can_hold(const std::array<double, 3>& alpha,
+                  double condition_limit) const;
+
+    /// The pose whose surface normal leans `tilt_rad` off vertical, towards
+    /// `azimuth_rad` measured from +x, at heave `z_c`.
+    ///
+    /// The pose convention is `R = Ry(theta) * Rx(phi)`, so the normal is
+    /// `[sin(theta) cos(phi), -sin(phi), cos(theta) cos(phi)]` — which means
+    /// neither `phi` nor `theta` is *the* tilt, and `sqrt(phi^2 + theta^2)` is
+    /// only the tilt to first order.  Anything asking "how far over can this
+    /// plate lean" wants the normal's angle from vertical and has to invert
+    /// that expression rather than approximate it.  Done here, once, exactly:
+    /// `phi` first, because `theta`'s half divides by `cos(phi)`.
+    static TablePose tilted_pose(double tilt_rad, double azimuth_rad, double z_c);
+
+    /// The furthest the plate can lean at heave `z_c` while the velocity
+    /// Jacobian's condition number stays under `condition_limit` — in EVERY
+    /// direction, because a bound that holds only where the mechanism happens
+    /// to be strong is not a bound on what the plate can be asked for.
+    ///
+    /// A leg is required to have a real solution AND to be within its travel,
+    /// rather than `inverse_kinematics`'s clamp being accepted.  A clamped leg
+    /// triple is a different pose from the one whose Jacobian is being asked
+    /// about, and the difference is not academic: evaluated at the clamped
+    /// triples instead, the condition number on the shipped geometry passes
+    /// **19 500 at 20 degrees and falls back under 100 at 22**, which is
+    /// arithmetic about a configuration that does not exist.
+    ///
+    /// **Swept upward from level, then halved inside the bracket the sweep
+    /// found.**  Bisecting the whole range would assume the predicate is one
+    /// unbroken run from level, and it is a conjunction of a reachability set
+    /// and a condition sublevel set with neither guaranteed convex in tilt.
+    /// The march returns the largest tilt with an unbroken run of successes
+    /// beneath it, which is what a bound wants rather than merely some root.
+    /// Measured on the shipped geometry the predicate does flip exactly once
+    /// over 0 to 60 degrees, so the two agree here — the march costs 2.3 ms
+    /// and does not rely on that continuing to be true.
+    ///
+    /// 36 directions because the answer stops moving long before then:
+    /// measured, every fan from 12 to 144 gives the same tilt to five decimal
+    /// places and 360 moves it by 0.0002 degrees.
+    ///
+    /// **Which of the two criteria binds is a property of the geometry, and on
+    /// the shipped plate it is the reachability one.**  At 150 mm legs the
+    /// plate runs out of travel at 15.63 degrees, where the condition number is
+    /// 15.7 — the "under 20" line would not have bound until 17.10.  The
+    /// condition gate takes over from about 200 mm legs: at 210 it binds at
+    /// 20.63 against 21.80 degrees of reach.
+    ///
+    /// That reverses what [#31](https://github.com/caliburn-engineering/caliburn/issues/31)
+    /// expected — "the workspace maximum is explicitly not the answer: the
+    /// workspace edge is precisely where the condition number blows up" — and
+    /// the measurement is recorded rather than the expectation.  The blow-up is
+    /// real and it is 1.5 degrees OUTSIDE the reachable set, so on this plate
+    /// the workspace maximum is exactly what `a_max` comes to.
+    ///
+    /// The gate is kept, and is not decorative: lowering `condition_limit`
+    /// moves the answer at once (15.51 degrees at 15, 13.66 at 10), it binds
+    /// outright on longer legs, and it is what stops a longer leg buying
+    /// acceleration by reaching into configurations the rates cannot be
+    /// believed in.  Reach alone would have handed it that.
+    double max_conditioned_tilt(double z_c, double condition_limit) const;
+
+    /// Determinant of the constraint Jacobian w.r.t. pose (J_pose)
+    /// Zero = type-1 (forward) singularity — table has uncontrollable motion
+    double det_J_pose(const std::array<double, 3>& alpha,
+                      const TablePose& pose) const;
+
+    /// Determinant of the constraint Jacobian w.r.t. alpha (J_alpha)
+    /// Zero = type-2 (inverse) singularity — servo motion doesn't affect constraint
+    double det_J_alpha(const std::array<double, 3>& alpha,
+                       const TablePose& pose) const;
+
+    // --- Home position ---
+
+    /// Default pose when all servos at given angle (typically 45°)
+    TablePose home_pose(double alpha_home = M_PI / 4.0) const;
+
+    const TableParams& params() const { return params_; }
+
+private:
+    TableParams params_;
+
+    /// Partial derivative of table rotation w.r.t. phi
+    Eigen::Matrix3d dR_dphi(double phi, double theta) const;
+
+    /// Partial derivative of table rotation w.r.t. theta
+    Eigen::Matrix3d dR_dtheta(double phi, double theta) const;
+};

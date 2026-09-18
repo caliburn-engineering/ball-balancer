@@ -1,7 +1,13 @@
-# Linear Analyzer — Context
+# Ball-Balancer — Context
 
-Interactive analysis of linear time-invariant systems: state-space plants, Tier 1
-compensators, and the frequency/time/pole-zero views over them.
+One application over two halves: a 3-RRS table balancing a ball under real
+rolling dynamics, and the analyzer that models a plant, closes a loop around it,
+and shows the consequences across Bode, Nyquist, pole-zero and step-response
+views.  The repository was named `linear-analyzer` until
+[#20](https://github.com/caliburn-engineering/caliburn/issues/20): it is the
+survivor of the merge and carries the whole history, so the name moved to match
+the product rather than the other way round.  The pre-merge ball-balancer
+repository is kept on disk, unmodified, as `ball-balancer-legacy`.
 
 ## Glossary
 
@@ -109,3 +115,1519 @@ Decided in [#6](https://github.com/caliburn-engineering/caliburn/issues/6).
 > The grid outlives the RGA: on a single-input plant the same widget shows
 > Channel Share, and on a 1×1 plant it is one cell with no diagnostic at all.
 > Naming it after one of its readouts hides that it is first an editor.
+
+### Plate view
+
+The ball-balancer half of the application: the 3-RRS table, the ball on it, the
+3D scene, and the Plate Control / Plate Plots panels.  It owns no window, no
+ImGui context and no main loop — the analyzer's entry point owns all three, and
+reconciling that was the whole of the merge.
+
+Drawn into the **central dock node**, which is deliberately left empty so the
+passthru dockspace shows the scene through it.  A window docked there would
+paint over the plate.
+
+Both targets since [#15](https://github.com/caliburn-engineering/caliburn/issues/15).
+The renderer draws through the GL subset shared by OpenGL 3.3 core and WebGL2 —
+vertex arrays, buffer objects, array draws — so the port was the shaders and
+nothing else: `#version 330 core` and `#version 300 es` plus a precision
+qualifier, supplied as a separate source string ahead of one shared body.
+
+`glLineWidth` above 1.0 is honoured or ignored at the driver's discretion under
+WebGL2, so line weight is decorative here and carries no information: every
+element of the scene is told apart by colour.
+
+### Status badges, and why nothing gets its own line
+
+**Text that comes and goes must never change the layout's height.**
+
+A warning drawn on its own line pushes every control below it down while it is
+showing and lets them snap back when it stops.  Several of these conditions are
+recomputed every frame — `balance_clipped_` and `balance_saturated_` both are —
+so the panel below them does not settle into a new position, it *vibrates*, and
+a slider the visitor is reaching for moves out from under the cursor.  Two
+independent warnings make it worse: the controls below have three different
+resting positions depending on which are showing.
+
+Two rules, and both are needed:
+
+- **A conditional message rides on a line that is always drawn**, appended with
+  `statusBadge` (`panels/panel_utils.h`).  It costs no vertical space, it
+  cannot reflow anything, and the line it attaches to is usually the reading it
+  qualifies: `error: 178.2 mm  clipped  saturated` says in one line both that
+  the loop is a long way off and why it is not closing the gap.  The label is a
+  word or two — a badge that wraps has reintroduced the problem — and the
+  sentence explaining what the condition *means* goes in the hover tooltip,
+  where there is room for it.
+- **Where a message is one of several alternatives, draw every branch.**  A
+  trailing `else` with a disabled "in contact" or "drag to command the legs" is
+  not clutter; it is what holds the line open so the panel stays still.  This
+  half cannot be enforced by a helper, only by remembering it.
+
+The block that reports the ball follows both: three lines, always — position,
+velocity, and exactly one contact line out of four possibilities.  It used to
+collapse to a single line when the ball went off the edge, moving everything
+below it up by two rows at the precise moment the visitor was reaching for
+Reset Ball.
+
+The plot panels get the same treatment through `drawSuppressedTraces`, and
+there the stakes are higher than a shifted control.  The "why is this trace
+missing" line has to be drawn *above* the plot — a plot consumes
+`GetContentRegionAvail()`, so anything after it is clipped out of the panel
+entirely — which means a line that comes and goes does not merely move the
+widgets below it.  It resizes the plot: the axes rescale and the whole curve
+moves, for a reason the reader cannot see.  So the line is always there, reading
+`suppressed: none` when nothing is.  The trace's NAME stays visible in the
+warning colour, because a suppressed trace still has to be distinguishable from
+a broken one; only the sentence saying why moves to the hover.
+
+Not every conditional line is a defect.  A section that appears because the
+visitor changed a mode — the path sliders under a trajectory, the setpoint
+controls under an engaged loop — is a layout change they asked for and expect.
+The rule is about text that appears because the *plant* did something.
+
+### Tilt convention (phi/theta vs alpha/beta)
+
+The two halves name the plate's tilt differently, and the mapping is neither
+identity nor a simple swap:
+
+```
+alpha = -phi        beta = theta
+```
+
+`TableKinematics` uses `R = Ry(theta) * Rx(phi)`, so the plate's local +Y edge
+*rises* with phi while its local +X edge *falls* with theta.
+`RollingBallDynamics` accelerates the ball by `+g*sin(alpha)` along y and
+`+g*sin(beta)` along x.  Theta therefore carries straight through and phi has to
+flip.
+
+A wrong mapping compiles, and still moves the ball — it just rolls uphill.  That
+is why the convention is pinned by `tests/test_ball_sim.cpp` rather than left to
+the eye, and why it lives in one function, `ballTiltFromPose`.
+
+### Plate frame
+
+The ball's state `[x, y, vx, vy]` is expressed in the **plate's own frame**, not
+the world.  Rendering lifts it into the world with the same rotation that places
+the leg attachment points: `p = c + R * (x, y, r_ball)`.
+
+The plate is a **disc**, so the ball leaves it at a radius of
+`R_table - r_ball`.  `RollingBallDynamics::on_plate` tests the inscribed
+*square* and is wrong here; `ballOnPlate` is the test that matches the geometry
+being drawn.
+
+### Balance loop
+
+The closed loop that the LQR design surface exists to produce: `u = -K(x - x_ref)`
+evaluated once per frame against the **nonlinear** plate, in `auto_balance.h`.
+`x` is the cascade plant's state read straight off the simulator — three leg
+deviations from the linearisation point, then the ball's `[x, y, x', y']` in the
+plate frame — and `u` is a leg-angle command, so nothing adapts tilt to legs
+anywhere.
+
+Engaged from Plate Control, and only while the model panel is offering a gain
+that was solved against **this** plate: the right controller type, a successful
+solve, a `3 x 7` gain, a ball actually being simulated *and still on the plate*,
+and a plant whose geometry *and gravity* match the simulated one.  Gravity is a cascade parameter
+and the plate's is fixed, so a gain designed on the moon is exactly as wrong as
+one designed for longer legs and is refused the same way.  Losing any of those
+drops the loop rather than freezing the last command, because a stale gain is
+not a controller — and `setDesign` is the single place that drop happens, so a
+draw pass cannot disagree with the step about who is driving.
+
+The plant a cascade parameter list describes is built by `cascadeMechanism` /
+`cascadeGravity` / `cascadeServoTau` / `cascadeHomeLegAngle`, and the model
+builder, the application and the tests all read those same functions.  A second
+transcription is how the check comes to reject two identical plates — it did,
+once, over a `float` slider widening to `0.3000000119`.
+
+> **A ball that has left the plate suspends the loop, and this was a bug.**
+> `loopDriving` tested "is the ball being simulated" as the *Simulate ball*
+> checkbox alone.  But a ball that has rolled off with *Auto-reset* switched off
+> stops being stepped too — `step` hands `stepSim` `ball_enabled_ &&
+> ball_on_plate_` — so the loop went on regulating a state that could never
+> change again, and pinned the plate at whatever tilt that dead ball asked for.
+> Exactly the failure `loopDriving` already existed to prevent, reached through
+> the door it was not watching.  What a visitor saw was a plate stuck hard over
+> and a Nudge button that did nothing, because the ball it nudges is not being
+> integrated; Reset Ball was the only way out and nothing said so.
+>
+> **Suspended, not dropped.**  `balance_engaged_` is left alone, so putting a
+> ball back resumes the loop rather than asking the visitor to re-engage it —
+> which is what unchecking and re-checking *Simulate ball* has always done, and
+> these are the same situation.  This is the one precondition that does not go
+> through `setDesign`, because it is not a fact about the design.
+
+Decided in [#16](https://github.com/caliburn-engineering/caliburn/issues/16).
+
+> **The sliders and the loop cannot both be live.**
+> Plate Control's three servo sliders and `u = -Kx` write the same array, so
+> while the loop is engaged the sliders go read-only and keep displaying what
+> the controller is asking for — the most direct view of the loop working.
+> Steering moves to a **ball-position setpoint**, which is a quantity the
+> design actually regulates.  A ball at rest anywhere on a flat plate is an
+> equilibrium of this plant, so that setpoint enters as a reference state and
+> needs no feedforward at all: the regulator is already a tracker.
+
+That last sentence is true of a setpoint being **held**, and #24 made it worth
+saying so.  A moving setpoint is not an equilibrium, and `[.., x_sp, y_sp, 0, 0]`
+then claims the ball should be at the setpoint *and stationary* — so the
+reference state grew a velocity.  `legCommand` takes a `BallReference`: where
+the ball should be, and how fast the setpoint is travelling.  Zero velocity is
+the held case and is what every caller but the trajectory driver passes, which
+is why the loop went so long without one.
+
+### Preset tunings
+
+Three named LQR tunings — **Detuned**, **Nominal**, **Aggressive** — in the
+model panel's LQR section, differing only in the ball's own state weights.  A
+visitor who flips between the outer two learns more about what controller
+design does in five seconds than the weighting matrices could tell them in five
+minutes, which is the whole reason they exist.
+
+> **Not the *plant* presets.**  "Preset" already means a built-in plant model
+> everywhere else here — `state.preset_index`, the `Preset` combo at the top of
+> the same panel, "the Quarter-Car preset".  These are **tunings**: a choice of
+> Q and R against one plant, not a choice of plant.  The surface says "Tunings"
+> for that reason, and the code says `LqrPreset` rather than `Preset`.  Reading
+> one for the other turns "the preset changed" into two different bug reports.
+
+| | Q on ball position / velocity | settles from 60 / -40 mm | what it shows |
+|---|---|---|---|
+| Detuned | 20 / 2 | 11.4 s | sluggish; never goes near a travel limit |
+| Nominal | 100 / 10 | 1.8 s | the shipped default, unchanged |
+| Aggressive | 150 / 2 | 0.62 s | saturates the servos the whole way in |
+
+`R` is 1 in all three and the leg weights stay at 1, so exactly one thing
+varies.  Pricing the legs *higher* buys sluggishness the position weight
+already buys more legibly; pricing them lower buys a tuning that loses the ball
+— `R = 0.1` against the nominal `Q` throws it off on 8 of 72 kick directions.
+
+**`defaultLqrStateWeights` is defined as the Nominal preset**, not the other way
+round, so "Nominal is what the application opens on" is arithmetic rather than
+two sets of literals that have to keep agreeing.
+
+**They are an offer, not a mode.** The weights stay editable after a preset is
+chosen, and no preset is stored — `activePreset` asks the *weights* which one
+they are, every frame, and answers -1 the moment a slider moves.  A stored
+selection would go stale on the first drag and keep claiming a tuning the plant
+no longer has.
+
+> **"Aggressive" saturates; it does not overshoot.**
+> The ticket asked for "fast but overshooting", and that is not what this plant
+> does.  The servo travel limits bite before the ball ever reaches the
+> setpoint, so saturation *limits the approach* rather than producing an
+> overshoot — measured position overshoot past centre is under a millimetre at
+> every tuning that keeps the ball.  The surface says "saturates", and the
+> `saturated` and `clipped` badges in Plate Control are the honest thing to
+> point at.
+
+On the cascade the presets replace the **Reset weights** button that #16
+shipped: Nominal writes exactly what it wrote, and two controls doing one thing
+only raise the question of how they differ.  Off the cascade there are no
+presets to reset *to*, and the button is still there.
+
+What bounds the aggressive end is the **ball**, not the solver.  Since
+[#23](https://github.com/caliburn-engineering/caliburn/issues/23) the ball can
+leave the plate vertically, and a tuning that slams the legs moves the plate
+out from under it rather than tilting under it — see "Contact, and the two
+phases" for what an over-aggressive gain does to a ball it can no longer hold.
+`Q` on position at 300 settles faster still and then throws the ball clean off
+on a 0.43 m/s nudge.
+
+150 is the fastest tuning measured that is **no more fragile than the tuning
+the demo already ships**: at `kMaxNudgeSpeed`, neither loses the ball in any of
+24 directions.  Pinned by
+`test_aggressive_is_no_more_fragile_than_the_shipped_tuning`, so raising that
+ceiling fails a test rather than quietly invalidating this paragraph.
+
+> **What the Nudge slider stops at, and why it came down from 0.5 to 0.30.**
+> Both numbers are measured; they measure different situations, and only one of
+> them is the situation the demo is in.  From rest at the centre of a level
+> plate, every tuning survives 0.5 m/s from every direction — that is the sweep
+> above, and it is the loop's easiest question.  The demo opens *tracking a
+> circle*, so a visitor reaching for Nudge is shoving a ball that is already
+> running at 75 mm/s past legs that are already displaced.  Swept over 36 points
+> of the lap and 24 directions, every tuning is clean at 0.30 and Nominal starts
+> losing the ball at 0.35.
+>
+> The interface could hand over 0.707 m/s, because **the two Nudge buttons
+> compose**: each adds the slider's value to one axis, so the pair is `sqrt(2)`
+> times it at 45 degrees, and the slider's top *was* `kMaxNudgeSpeed` itself.
+> Measured, that pair lost the ball at every one of 36 points of the lap while
+> every test passed — because every test shoved from rest.  So `kMaxNudgePerAxis`
+> is the slider's ceiling now, derived as `kMaxNudgeSpeed / sqrt(2)`, and the
+> worst the pair composes to is exactly the number the envelope was measured at.
+>
+> The slivers thin as the shove shrinks rather than stopping at a threshold —
+> Detuned fails at 0.40 and 0.45 and is clean again at 0.50 — which is the same
+> shape as `kMaxSetpointSpeed`'s bound and the same reason for leaving margin.
+> A demo whose controls include a setting that breaks it is not offering a
+> choice, it is offering a trap.
+>
+> **Every failure in that table is gone since #29, and the bound stays at 0.30
+> anyway.**  Re-measured on the same 36 x 24 grid with the plate bounded to
+> poses it can be believed at, all three tunings are clean at 0.35, 0.40, 0.45
+> and 0.50 — so "Nominal starts losing the ball at 0.35" has stopped being true,
+> and the slivers were the plate changing assembly mode rather than the gain
+> running out.  What that retires is the evidence FOR 0.30, not the case for a
+> bound: the envelope past 0.50 is unmeasured, and raising a limit is a product
+> decision rather than a consequence of a green table.
+>
+> **It is owned rather than orphaned.**  `kMaxSetpointSpeed` is in exactly this
+> position after #31, and both belong to one sweep — the decision record's D16,
+> which the ticket closing #23 owns.  Re-measuring either against today's
+> contact model would be wasted work in any case: #23's round two makes landing
+> bounce, and restitution moves the separation behaviour this envelope is made
+> of.  The numbers are left standing rather than quietly adjusted, because a
+> bound whose stated reason has moved is worth noticing.
+
+Detuned interacts with attract mode harmlessly: it settles in 11.4 s against a
+4 s kick period, so kicks would pile up — but choosing a preset is a click, and
+attract mode stands down on the first click.
+
+Decided in [#19](https://github.com/caliburn-engineering/caliburn/issues/19).
+
+### Leg command vs leg angle
+
+Two arrays, since the loop was closed.  `PlateView::alpha_cmd_deg_` is what the
+sliders, the animation or the controller **ask for**; `SimState::alpha_rad` is
+where the legs actually **are**, one first-order lag behind at the plant model's
+own `tau`.
+
+They live in different places on purpose, and it is the same distinction as
+everywhere else here: what the plate is being *asked* for belongs to the panel
+asking, and where the legs *are* is a fact about the simulation, so it sits in
+the state `stepSim` owns.  Where the legs are was also a display `float` until
+#30, which quietly rounded the plate the application simulated to seven digits
+while every harness ran it in double.
+
+The lag applies to **every** writer, not just the loop.  It is a property of
+the plate rather than of the controller, and making it conditional would mean
+the manual plate and the modelled plate are two different machines.  Home/Low/
+High therefore command rather than teleport, and the Animation amplitude is the
+amplitude *asked for* — attenuated about 1% at its default 0.5 Hz, which is
+what a real servo does.  A reset is the one thing that is not a command:
+`simStart` puts the legs where they belong outright, because a reset is not
+driving anything and has no lag to respect.
+
+Before this the slider *was* the leg angle, and closing `u = -Kx` around that
+is an algebraic loop on the leg states — the gain would have been reacting to
+its own command one frame earlier.  The servo dynamics the cascade model claims
+had to become real in the simulator for the design to mean anything.
+
+The lag is integrated in closed form, not by forward Euler: the plate runs at a
+fixed 60 Hz and tau defaults to 0.05 s, three steps per time constant, and the
+tau slider goes lower still.
+
+**The servo is rate-limited as well as lagged, which makes that integral
+piecewise** (#32).  A first-order lag has unbounded initial rate and a real
+servo does not, so `TableParams::alpha_rate_max` caps it at **10.47 rad/s** —
+0.1 s per 60 degrees, the class of high-torque digital servo a 600 mm table on
+150 mm legs would be built from, written as the arithmetic rather than as a
+rounded 10.5.  It is a property of the mechanism, so it lives beside the travel
+limits and is enforced in `stepServos` / `stepServosOnPlate`, where every
+harness inherits it — not as a clamp on the command in `legCommand`, which
+would make it a controller choice.
+
+    e = cmd - alpha,  and the lag takes over at |e| = rate_max * tau
+
+    |e| <= rate_max * tau :  alpha <- cmd + (alpha - cmd) exp(-dt/tau)
+    otherwise, t_r = (|e| - rate_max * tau) / rate_max :
+        dt <= t_r :  alpha <- alpha + sign(e) rate_max dt
+        dt >  t_r :  alpha <- cmd - sign(e) rate_max tau exp(-(dt - t_r)/tau)
+
+Both branches are closed form and neither can overshoot at any `dt`, so the
+reason the exact form exists at all survives the change: the ramp stops at the
+handover rather than past it, and the decay approaches `cmd` without reaching
+it.
+
+**The handover is at 30.00 degrees of leg error** against the shipped tau, which
+is deliberately large — this is insurance for a saturated kick recovery, not the
+fix for a corner, which is #31's.  Measured over 72 directions at the demo's own
+0.26 m/s Nudge, the worst leg error a frame produces is **27.30 degrees under
+Nominal** and **30.26 under Aggressive**: the limit never engages under the
+shipped tuning and engages on a single frame out of 187,920 leg-frames under
+Aggressive.  Nothing separates either way, the normal-force margin is 1.913 m/s²
+Nominal and 1.354 Aggressive with and without it, and the peak reach is 31.15 mm
+and 28.57 mm either way.  Pinned in
+`test_the_rate_limit_is_insurance_rather_than_a_tax`.
+
+**K is unchanged, and so is the linearised cascade model.**  Same reasoning as
+the travel clamp: a saturation outside the design model, accepted and
+documented, not a redesign trigger.  The cascade plant's servo block is still
+`-1/tau` per leg and nothing else, which `test_servo_block` pins.
+
+### Assembly mode
+
+Which solution of the 3-RRS constraint equations a pose is.  The mechanism is
+**built upward** — table above its knees — and the other roots are the ones
+this section is about.  There are more than two, and they are not alike: the
+**folded** root is #22's, and #29 found that the built assembly itself has a
+neighbour it can be swapped for.  For this plate the
+folded one is not an approximation or a numerical artefact: `R_ground ==
+R_table` with `L1 == L2` makes `(phi, theta, z_c) = (0, 0, 0)` satisfy every
+leg's length constraint exactly, at every servo angle.  It is a single pose,
+the same one whatever the legs are doing.
+
+A residual norm cannot tell the two apart, so **a converged forward-kinematics
+solve is not by itself an answer about a mechanism**.  `forward_kinematics` is
+a Newton solver and will return whichever root its seed is nearest;
+`solve_pose` is the one that stays on the built assembly, re-solving from the
+analytic level pose when the warm start lands on the folded one.
+
+This is why issue #22 was invisible for so long.  A hard manoeuvre carried the
+pose down through the knee plane, Newton settled on the folded root, and every
+frame after that was seeded from a pose that was *already* a root — so it
+converged in one iteration with a residual of 1e-11 and never left.  The plate
+then had no tilt authority at all and every ball put on it rolled off.  Sixty
+seconds in, and permanent.
+
+The floor separating them is a tenth of the mean knee height.  Measured over
+300k samples against assemblies verified by IK round-trip, the built population
+runs from 0.163 to 2.00 mean knee heights and the folded root sits at zero, so
+the floor clears the lowest real pose by 1.6x and the folded one by everything.
+Both ends are pinned by `tests/test_assembly_mode.cpp`.
+
+Decided in [#22](https://github.com/caliburn-engineering/caliburn/issues/22).
+
+> **Not "the FK failed" and not "a singularity".**
+> Nothing failed: the solve converged, to a real root, of the right equations.
+> And a singularity is a place where the Jacobian loses rank — this is a
+> perfectly well-conditioned second solution. Calling it either invites the fix
+> that was already there and did not work: a tighter tolerance, or a retry
+> keyed on convergence.
+
+**The folded root is not the only one, and the floor cannot see the others.**
+Approaching a direct-kinematics singularity the built assembly meets a
+*second built* assembly, they exchange, and a pose marched through the meeting
+comes out on the other one with the plate leaning the opposite way.  At the
+triple #29's aggressive sweep drove the plate to, the two sit at **153 mm and
+75 mm** of heave with roll angles of −20.4° and +12.0°, both satisfying the
+constraint equations to better than 1e-9, and the nearer of the two standing
+nine times clear of the 8.5 mm floor.  Nothing in #22's guard is looking at this: it separates the built
+population from a single point at the origin, and neither of these is near it.
+
+What tells them apart is the **conditioning**, which is what makes the same
+threshold this repository already trusts the right bound — see *Workspace vs.
+servo box*.  Away from the meeting the two assemblies are far apart and the
+Jacobian is healthy; at it they coincide and it degenerates.  Measured, the
+plate crossed a condition number of **290** in one frame and came out mirrored.
+
+Decided in [#29](https://github.com/caliburn-engineering/caliburn/issues/29).
+
+> **Not "the plate flipped" and not "the solver diverged".**
+> Both assemblies are poses this mechanism genuinely has, reached continuously;
+> what a real plate cannot do is *pass between* them, because at the crossing
+> it gains an instantaneous freedom nothing is holding. Describing it as a
+> flip suggests a discontinuity to detect, and describing it as divergence
+> suggests a solver to tighten. The fix is neither: it is not steering the
+> plate there.
+
+> **OPEN, and found while closing #29: a big enough leg step can jump the
+> solve onto a third root, with no singularity involved at all.**
+> `solve_pose` warm-starts from the previous frame's pose, and Newton returns
+> whichever root its seed is nearest.  `can_hold` asks about the **level-seeded**
+> root, so once the two part company the command is being cleared against a
+> plate the simulation is not running.
+>
+> Measured at `Q = 2000` — four times the aggressive preset — under a 0.60 m/s
+> shove, in 3 of 180 directions.  In the clearest of them one frame moves a leg
+> **10.6 degrees** and the marched pose lands at a roll of −14.8 degrees and a
+> heave of 146.0 mm, where the level-seeded root sits at +1.0 degrees and
+> 194.9 mm.  Both roots are well conditioned there (5.5 and 6.1), both clear the
+> floor, and the residual is 2e-17.  This is not a mechanism passing through a
+> singularity, it is a solver being seeded badly, and neither #22's guard nor
+> #29's can see it.
+>
+> **No tuning the UI offers reaches it.**  Swept at 180 directions, Nominal and
+> Aggressive change assembly in no direction at any speed up to 1.50 m/s — five
+> times the largest disturbance the interface can compose — and both keep the
+> ball everywhere below 1.20 m/s, where they lose it in all 180 directions to
+> the gain running out rather than to a jump.  At `Q = 2000` the count runs 0 at
+> 0.43 m/s, 3 at 0.60, 18 at 0.80, 21 at 1.00 and 0 again at 1.50.
+>
+> **#32's rate limit does not close this**, which is worth saying because it
+> looks as though it would.  A 10.47 rad/s servo caps a 60 Hz frame at 10.00
+> degrees of leg travel, and one of the three jumps above happens on a step of
+> **8.79 degrees**.  Capping the input is not the same as the solve being right.
+> The limit has since landed and this is still open.
+>
+> The fix is not a threshold either.  `can_hold` already defines the command set
+> by the level-seeded root, so the honest rule is that `solve_pose` must return
+> the assembly `can_hold` vouched for, and the warm start is an optimisation
+> that has to agree with it — a change to the forward solve's contract.
+>
+> Filed as
+> [#35](https://github.com/caliburn-engineering/caliburn/issues/35).
+
+### Workspace vs. servo box
+
+The three servo travel limits form a **box**; the set of leg triples the plate
+can actually be assembled at is not one.  Barely half the box has any assembly,
+and a *single* leg taken to either of its shipped stops with the other two at
+home already has none — the mechanism's real range about the home pose is far
+narrower than its servos'.
+
+So clamping each leg to its own travel is not enough.  A per-leg clamp can hand
+back a triple the plate cannot make, and a plate that cannot make its command
+has no pose: it freezes at whatever tilt it last held, and a frozen tilted plate
+rolls the ball off.  That was the other half of #22 — nearly two thousand frames
+of a ten-minute run.
+
+**The scatter was the folded assembly, not the controller.**  Before the fix
+the loss counts jumped about with no pattern — 0.22 m/s of kick lost the ball
+where 0.25 did not, and servo travel of ±35 degrees lost 61 balls in five
+minutes where ±45 lost none and ±60 lost 65.  That is not something a
+stabilising loop does, and it is what said the cause was discrete rather than
+dynamic: whether a particular trajectory happened to carry the pose down
+through the knee plane on some frame is a yes-or-no event, and everything
+downstream of a yes was already broken.  Travel limits and kick magnitude
+changed *which* trajectories crossed, not how much authority the loop had.
+
+With the assembly pinned, the response became monotonic in the disturbance the
+way it should always have been: at 360 swept directions the shipped tuning lost
+none at 0.35 m/s, 2 at 0.42, 14 at 0.50 and 259 at 0.60.  A curve, not a
+scatter — and one that says something true about the plant.
+
+**Re-measured after #29 the curve has moved a long way out, and it is a curve
+again.**  On the same grid the shipped tuning now loses none at 0.35, 0.42, 0.50
+or 0.60, none at 0.90, and all 180 at 1.20 and 1.50.  Monotonic, with the edge
+somewhere between 0.90 and 1.20 m/s — four times the largest disturbance the
+interface can compose, against the 0.42 where losses used to start.  What moved
+it is that the plate is no longer allowed to steer itself into a
+near-singularity, which is where the authority was going.
+
+`retreatToHoldable` is the one answer, used at both seams: pull the target back
+toward a triple known to be good until it is too.  (It was `retreatToWorkspace`
+until #29, which is the name for the set it used to retreat into — see below.)
+Giving up magnitude and keeping direction is what saturation ought to do.
+
+**It marches before it bisects**, the same shape `max_conditioned_tilt` uses and
+for the same reason.  Halving the whole ray assumes the good points are one
+unbroken run from the safe end, and they are not: the set is a reachability set
+intersected with a condition sublevel set, and the condition number rises toward
+a singularity and falls again past it, so a ray can run good, bad, good.  A
+plain bisection can converge into that third band and return a command the legs
+cannot travel to, because the servo step is clipped at the band — measured over
+4000 random targets in the servo box, on 1 of the 2147 retreats they provoked.
+Marching half a degree of the widest leg coordinate first, then halving inside
+the bracket, makes the returned point one that was tested *and* reachable by an
+unbroken run.
+
+It costs what the ray is long, which is the right way round: one or two solves
+for a servo step, which is a fraction of a degree and is what runs every frame,
+and up to seventy for a command pinned to the far corner of the servo box, which
+is a frame that is already saturated.  Measured end to end over 72 aggressive
+kick sweeps, `stepSim` costs **20.7 µs on average and 618 µs at its worst**,
+against a 16.7 ms frame.
+
+Both seams are needed, which is the part worth remembering.  `legCommand` clips
+the command against the level pose; `stepServosOnPlate` clips the *step*
+against where the legs already are.  Clipping only the command leaves the
+straight line the first-order lag travels along, and that line can leave the
+workspace even when both of its ends are inside it.  Two kick directions in
+every 360 were exactly that: one frame, mid-flight, with no assembly.
+
+The clip is not a rare corner.  A single 0.26 m/s kick saturates the legs and
+clips the command in **all 180** directions tested, under the shipped tuning and
+the aggressive one alike.  It runs on essentially every disturbed frame.  (It
+was 177 of 180 for the shipped tuning before #29 tightened the bound; the three
+that used to squeak through now do not.)
+
+Decided in [#22](https://github.com/caliburn-engineering/caliburn/issues/22).
+
+**"Assemblable" is not the bound; "holdable" is, and #29 is what the
+difference cost.**  A triple can have a perfectly good assembly and still be
+somewhere no plate should be steered, because a second built assembly is
+waiting on the far side of a singularity (see *Assembly mode*).  Driven there,
+the plate came back **mirrored**: 13.8° over with its downhill pointing at the
+ball, while the loop went on asking for the opposite tilt and the ball
+accelerated to 1.04 m/s and off the rim.  Not a hop — the ball was rolling the
+whole way — and not the gain's fault either, which is why #29 spent its first
+half looking for one.
+
+**Neither of the two flags that were watching says anything about it, and that
+is the finding rather than an aside.**  #29 asked which of three things binds.
+
+- **`clipped_to_holdable` fires, and discriminates nothing.**  A 0.26 m/s kick
+  clips the command in all 5760 swept directions under every tuning the UI
+  offers, at every speed from 0.26 to 0.35 m/s.  A flag that is true on every
+  disturbed frame cannot be the difference between the frames that lose the
+  ball and the frames that do not.
+- **`rates_trustworthy` fires too, and cannot act.**  It went false on the
+  frame the plate crossed condition 290 and stayed false for three frames, and
+  again from 0.25 s after the kick — it saw the whole event.  But it is a flag
+  on `PlateMotion` that only the *contact* test reads, and all it can do is
+  decline to decide a separation on rates it does not believe.  The loop never
+  consults it, the command is not bounded by it, and the ball here was never
+  airborne: it rolled off a plate tilted the wrong way.  Watching is not the
+  same as binding.
+- **Plain workspace geometry binds** — specifically the geometry `can_assemble`
+  was never asked about.
+
+That is why the guard goes on the command rather than on either flag, and why
+the threshold is the one `rates_trustworthy` already uses: the quantity was
+always the right one, it was simply being reported instead of respected.
+
+So the set the retreat works in is `can_hold`'s rather than `can_assemble`'s:
+assemblable, **and** with a velocity-Jacobian condition number at or under
+`kRatesUntrustworthyAbove`.  That number is not new and was not chosen here.
+It is the contact model's trust bound (#23), the tilt limit the corner fillet
+is sized by (#31), and the line the plate panel already paints red and calls
+"Poor" — one opinion about when this mechanism is in trouble, now enforced
+rather than only reported.
+
+**The margin it takes back is tiny, which is the point rather than an
+objection.**  On the ray from level to the servo box's hardest corner —
+`(10, 10, 80)` degrees, which is what an over-driven command clamps to — the
+retreat now gives up at a scale of **0.6124** where an unbounded one runs to
+0.6307.  Three per cent of one ray, and the singularity is in it.  The bound is
+live in both directions: at a limit of 10 the retreat stops at 0.5210, at 15 at
+0.5922, at 40 at 0.6272.
+
+What it costs, and what it bought:
+
+| over 720 kick directions at 0.26 m/s | before | after |
+|---|---|---|
+| Nominal — balls lost | 0 | 0 |
+| Nominal — worst condition number | 12.3 | 11.3 |
+| Aggressive — balls lost | **1** | **0** |
+| Aggressive — worst condition number | **290.5** | 11.1 |
+| normal-force margin, 72 directions | 1.62 m/s² | 1.91 |
+
+Over the 24 path settings the sliders offer, Nominal keeps all 24 either way;
+its worst condition number falls from 21.3 to 16.6 and the ball's widest reach
+from 193.0 mm to 192.9.  The plate is a little less willing at full tilt and
+the ball runs half a millimetre further out of a kick — 30.7 mm to 31.2 — which
+is the whole of the price.
+
+Decided in [#29](https://github.com/caliburn-engineering/caliburn/issues/29).
+
+> **The plate has less authority than the linear design believes.**
+> The cascade model knows about servo travel and nothing about the workspace,
+> so the gain will ask for tilts the mechanism cannot make, and against a
+> disturbance large enough it will lose the ball rather than recover it.
+>
+> There was no clean ceiling: the slivers of direction where it could not come
+> back got narrower as the disturbance shrank rather than stopping at a
+> threshold.  At 5760 swept directions, 0.29 m/s of ball velocity lost six,
+> 0.28 lost two, and 0.26 lost none.  Attract mode's kick sits at 0.26 for that
+> reason.
+>
+> **#29 removed every one of those slivers, and they were not what this
+> paragraph thought they were.**  Re-measured on the same 5760-direction grid,
+> the shipped tuning loses none at 0.26, 0.28, 0.29, 0.30 or 0.35, and the
+> aggressive one loses none either — the slivers were the plate changing
+> assembly mode through a singularity, not the gain running out of authority.
+> The first sentence's *argument* still stands: the cascade model knows about
+> servo travel and nothing about the workspace, and the plate is clipped in all
+> 5760 of those directions at every one of those speeds.  What has gone is the
+> evidence that the clipping was losing the ball.  The edge is now between 0.90
+> and 1.20 m/s, and it is a threshold rather than a sliver: at 1.20 every one of
+> 180 directions loses the ball.
+>
+> Designing a gain that respects the workspace is still not done, and is still
+> the thing that would replace this argument with a guarantee.
+
+> **"Assemblable" and "holdable" are two words because they are two sets.**
+> *Assemblable* (`can_assemble`) is the workspace: a built assembly exists.
+> *Holdable* (`can_hold`) is the workspace without its singular fringe: an
+> assembly exists AND the velocity Jacobian there is one this repository says
+> it believes. Every holdable triple is assemblable and the reverse is false,
+> and the gap between them is small — three per cent of the hardest ray — which
+> is exactly why using the wrong one cost a release blocker rather than being
+> obvious. Commands and servo steps are bounded by the second; the first is
+> still the right question to ask about whether a pose exists at all.
+
+### Attract mode
+
+The application driving itself for a visitor who has not arrived yet: the
+balance loop engaged as soon as a gain exists, and the ball already tracing a
+120 mm circle at a ten-second lap.  Named after the arcade cabinet's demo reel,
+which solves exactly this problem.
+
+A motionless canvas is indistinguishable from a broken build, and a still
+balanced ball reads as a photograph of one.  A visitor gives the page about ten
+seconds and will not go looking for a play button.
+
+**This used to be a disturbance schedule, and the change is worth recording
+because the original reasoning was sound.**  The demo opened with the ball 72 mm
+off centre and kicked it every four seconds, on the argument that what
+distinguishes a control system from an animation is *recovery*: something
+disturbs the ball and the loop puts it back.  In practice it read as a fault.
+
+Two reasons, and the first is the one that matters:
+
+- **A kick is legible only against a still baseline.**  A ball parked at the
+  centre, nudged, returning — that is a story.  But the still moment between
+  kicks is also the moment the page looks like a static image, so the demo
+  spent most of its time looking broken in order to make the other part legible.
+  A circle needs no baseline: at every instant the ball is somewhere it was
+  told to be and the plate is visibly working to keep it there.  The loop is
+  not demonstrating that it *can* respond, it is demonstrating that it *is*
+  responding, continuously — which is also the more honest claim, since it is
+  the one running every frame.
+- **The opening displacement was a step input.**  Handing a state feedback
+  72 mm of error at `t = 0`, with the legs exactly at home and no servo history
+  to smear it, is a step: measured, the legs swung **20.7 degrees apart within
+  three frames** and the table dropped 4.5 mm before settling inside 250 ms.
+  Correct, and it looked like the mechanism glitching.  Starting the ball ON
+  the path at the path's own velocity makes both the position and the velocity
+  error zero at `t = 0`; the same measurement then gives a **3.0 degree**
+  opening swing with the table height not moving at all.  Pinned by
+  `test_the_opening_does_not_slam_the_legs`.
+
+What is given up is stated plainly, because it was a real acceptance criterion:
+**the demo no longer shows disturbance rejection unprompted.**  The visitor can
+still see it — the Nudge buttons are right there — and the property is still
+pinned by `tests/test_attract_mode.cpp`, which sweeps a 0.26 m/s disturbance
+over all 720 directions and checks the ball comes home from every one.  It is
+no longer *performed*.  That sweep also moved: the kick used to be production
+code the demo delivered, and is now a test fixture, because what it tests is a
+property of the plant and the gain rather than of the demo.
+
+Two decisions carry the opening:
+
+- **The opening state is a state, not a performance.**  It is set once in the
+  constructor and then the visitor owns it.  The old mode had to watch for a
+  visitor arriving so it could stand its kicks down, and never resume; a circle
+  has nothing to stand down, so the watching went with it.
+- **The circle rather than a cornered shape.**  Its tracking error is smooth,
+  so the opening reads as competence rather than as the ball stumbling at every
+  corner.  The corners are the better demonstration and are one dropdown away —
+  but they are an argument the visitor should choose to hear, not the first
+  thing they see.  120 mm at a ten-second lap is 75 mm/s, a third of the speed
+  cap, tracked to 3.7 mm.
+
+`setDesign` is where the loop first closes, and it has to be: on the opening
+frame the LQR solve has not run, so a `balance_engaged_` set true in the
+constructor would be cleared by the stale-gain drop and never set again.
+Engaging on the first *usable* design is what "already stabilising at load"
+actually amounts to.  It fires **once** — without the latch it would re-engage
+a loop the visitor had deliberately dropped, on the very next frame, which is
+the demo arguing with the person using it.
+
+The application also opens with `ControllerType::LQR` selected and the
+closed-loop trace visible, since a page whose whole claim is that the loop is
+closed should not open its pole-zero map on the open-loop poles.
+
+Decided in [#17](https://github.com/caliburn-engineering/caliburn/issues/17),
+revised for the opening path in
+[#24](https://github.com/caliburn-engineering/caliburn/issues/24).
+
+> **Not "demo mode", "idle mode" or "screensaver".**
+> All three name a state the application is *stuck in* until something releases
+> it, and two of them imply a substitute for the real thing — a canned loop
+> playing where the product would be.  Nothing here is canned: the plate, the
+> gain and the rolling ball are the same ones the visitor gets, and the only
+> difference is who is choosing the setpoint.  "Attract" also says what the
+> mode is *for*, which is the test any addition to it has to pass.
+>
+> Prose may still call the running page "the demo" — that is the artefact, not
+> the mode.
+
+### One sim loop
+
+One simulation step, in `sim_step.h`, and the application and every test
+harness drive it:
+
+```
+setpoint → loop → servos → kinematics → plate motion → ball
+```
+
+`stepSim(plate, input, state)` *is* a frame.  `SimPlate` is the mechanism, the
+ball rolling on it and the gravity they share; `SimState` is everything a frame
+hands to the next; `SimInput` says what the plate is being **asked** for — the
+design, whether the loop or the sliders own the legs, which path the setpoint
+is running; `SimReport` says what came back.  `PlateView::step` is now the ImGui
+half of the frame plus one call, and a harness is a runner that decides what to
+*measure* and when to shove the ball.
+
+**This was five copies, and every one of the three things that went wrong with
+them was a divergence rather than a bug in any single copy.**
+
+- **A guard in one copy and not the other.**  #22's attract kick was thrown away
+  while the ball was airborne, and it hid because the harness carried a guard
+  the application did not.  The code review found the duplication at the time
+  and left it, with the right reason recorded: *"fair — it is what let finding 2
+  hide."*
+- **An edit that has to land five times.**  Making the plate's accelerations
+  analytic (#23) meant changing the same `plateMotion` call in `plate_view`,
+  twice in `test_attract_mode` plus once more inline, in `test_auto_balance` and
+  in `test_trajectory`.  Every copy got it, three suites went red, and no
+  harness pinned a baseline — so the `/grilling` session on #23 spent most of
+  its length unable to answer *which normal-force estimator was that table
+  measured against?*
+- **A silent disagreement nobody was looking for.**  The application computed
+  the servo rate `α̇ = (cmd − α)/τ` from the legs **after** the frame's step; all
+  five harnesses computed it from where they were **before** it.  Those differ
+  by `exp(−dt/τ)` — a factor of **1.40** at 60 Hz against a 0.05 s lag — and it
+  multiplies straight through `ω`, `ω̇` and `c̈` into whether the ball leaves the
+  plate at all.  Every harness had been measuring a plate 40 per cent livelier
+  than the shipped one, for as long as there had been harnesses.
+
+The rate belongs at the instant the pose belongs to, which is *after* the step:
+`plateMotion` is handed the pose and the leg angles at the end of the frame, so
+handing it a rate from the start of the frame pairs a configuration with a
+velocity from a different moment.  The application was self-consistent and the
+harnesses were not, so the application's order is the one that survived — which
+is also what "no user-visible change" requires.
+
+> **A harness that carries its own copy of the causal order is not evidence
+> about the application, it is evidence about itself.**
+> This is the same argument `cascade_fixture.h` already made about the gain and
+> the plant, extended to the thing they are measured *through*.  The runners
+> still differ — settling time against a setpoint, a whole trace against a path,
+> a disturbance swept over every direction — because those are different
+> questions.  What a frame *is* is not a different question.
+
+Two smaller transcriptions went with it.  `cascadePlate` and `cascadeDesign`
+build the plate and the operating point from one cascade parameter list, so the
+application's `handDesignToPlate` and every harness assemble them identically;
+and `simStart` owns what a start state is, so nothing begins from a plate with
+one real plate-motion frame and one default-constructed zero.
+
+Decided in [#30](https://github.com/caliburn-engineering/caliburn/issues/30).
+
+### Contact, and the two phases
+
+The ball is no longer glued to the plate.  `RollingBallDynamics` still models
+the rolling half — it is a good model of a ball in contact — but whether the
+ball IS in contact is a question it could not ask, because it had no normal
+force and no vertical state.
+
+`ball_contact.h` asks it.  `N/m = g(n·z) + n·c̈ + n·[ω̇×(Rs) + ω×(ω×(Rs))] +
+2n·(ω×Rṡ)` — gravity's share along the normal, the plate being driven up or
+down under the ball, the plate's rotation swinging the contact point, and
+Coriolis.  **`N/m ≤ 0` is separation**: a surface can push a ball and never
+pull it.
+
+**The rates in that expression are analytic, and most of the hopping this
+section used to report was the estimator rather than the plate.**  `c̈` and `ω̇`
+were a finite difference of `ċ` and `ω` across consecutive frames — a defensible
+estimator for a smooth signal, and these are not smooth.  The leg rate is
+`(cmd − α)/τ`, and `cmd` is a zero-order hold: it *steps* every time the loop
+changes its mind, and differencing a step gives `1/dt`.  The overstatement is
+exactly `τ/dt` on a stepping frame — 3× at 60 Hz and 12× at 240 — so it grew as
+the timestep shrank rather than converging.
+
+The servo lag differentiates in closed form instead.  `cmd` is held across the
+whole frame, so `α̈ = −α̇/τ` exactly, and the same Jacobian that carries `α̇` to
+the pose rates carries it to the pose accelerations.  `servoRate` and
+`servoAccel` are the single statement of both, and they carry the rate limit
+with them: while a leg is ramping, `α̇` is the constant `rate_max` and **`α̈` is
+exactly zero**, so the `c̈` and `ω̇` terms that decide separation vanish precisely
+when the loop is slamming hardest.  At the handover `α̈` jumps to `−α̇/τ`, the
+same magnitude an unlimited servo would have had, but later and from a smaller
+error — strictly better, never worse (#32).  What is left to difference
+is how `J_v` and the tilt-rate map are themselves changing, and those are
+functions of the leg angles and the pose: continuous, neither of them stepping.
+Both history terms are load-bearing — dropping them gets `ω̇` wrong by 13% and
+`c̈` wrong in *sign*.
+
+Measured at the corner of a square path on a thirty-second lap, a setpoint
+crawling at 24 mm/s and about as gentle as this demo gets:
+
+| | `\|ω̇\|` | `N/m` | outcome |
+|---|---|---|---|
+| differenced | 101 rad/s² | −7.3 | ball launched at 0.26 m/s |
+| analytic | 50 rad/s² | −0.6 | contact held |
+
+A corner is a step in the reference velocity by construction (`pathVelocity`
+says so), so the artefact fired on **every corner of every lap**.
+
+So separation is real, and it is *rarer than any figure this section has ever
+carried*.  Under the shipped tuning at a 0.26 m/s disturbance the ball separates
+in **0 of 720 directions**, and not by a hair: the worst frame of the whole
+sweep still has **1.91 m/s² of normal force in hand**, a fifth of a g — 1.62
+before #29 stopped the plate steering itself into a near-singularity, since a
+plate that may not slam as hard does not press the ball as lightly either.  The
+figures this paragraph used to give were 30-in-72 with the differenced
+estimator, then 2-in-720 once the accelerations went analytic.  Both were
+measured by harnesses that took the servo rate at the frame's *start* while
+pairing it with the pose at the frame's *end*, which runs the plate 40 per cent
+fast — see *One sim loop* above and #30.  At 0.30 m/s that alone was the
+difference between 26 directions in 72 separating and none.
+
+The plate does heave hard when the legs do (`z_c = 0.30·sin α`, so a 20° leg
+swing is 74 mm of table in a tenth of a second), and a loop rejecting a
+disturbance does slam the legs.  What changed, twice, is that the plate is no
+longer credited with accelerations its servos never produced.
+
+**Distinguish the tuning from the demo here, since they parted company.**  The
+shipped *tuning* still hops the ball once the shove is hard enough: swept over
+36 points of the lap and 24 directions against a ball already tracking the
+opening circle, a shove at `kMaxNudgeSpeed` separates it in about one run in
+nine, and the ball bounces for up to three seconds before it settles.  It does
+not lose it — that is what the bound is chosen to make true, and the envelope
+behind it is tabulated at `kMaxNudgeSpeed`, which #23 re-measured and moved from
+0.30 to 0.20 because an elastic ball spends far longer off the plate than an
+inelastic one did.  The shipped *demo*
+does not hop at all, because it no longer kicks the ball: tracing a gentle
+circle never separates it, and
+`test_ten_minutes_unattended_never_loses_the_ball` asserts exactly that — zero
+airborne frames in ten minutes.  Neither fact implies the other.  See *Attract
+mode*.
+
+**Two phases, two frames, and the frame is not a detail.**  Rolling is natural
+in the plate frame — that is where `RollingBallDynamics` integrates and where
+the cascade plant's state vector is written, and neither should change because
+the ball can leave.  Flight is natural in the world frame, because "only
+gravity acts" is a statement about an inertial frame.  Each phase keeps its own
+truth and `plateFrame` converts on demand.
+
+A launch takes the ball's **full** world velocity, including the plate's motion
+at the contact point — which is most of it when the legs are slamming.
+
+**Landing is a bounce, and it used to be inelastic on purpose.**  The words
+being reversed are these: *"a real ball bounces, but a restitution coefficient
+is a number nobody here has measured, and the behaviour this exists to show does
+not depend on it."*  The second clause still stands.  The first stopped being
+true when the coefficient was measured by somebody else: Chai et al., *J. Phys.:
+Conf. Ser.* **2557** 012057 (2023) dropped a POM sphere onto a 304 stainless
+plate and timed the intervals between impacts acoustically at 48 kHz, getting
+**e = 0.94**.  It applies to *this* ball because the ball already had a material
+whether anyone said so or not — `kPlateBall` fixes 50 g at a 20 mm radius, which
+is 1492 kg/m³, and their sphere is 1410 — so nothing about the ball had to be
+retuned to accept the number.  Two extrapolations are on the record rather than
+glossed: their impact is ~1.98 m/s against separations here nearer 0.2, and
+their sphere is 14.8 mm across against this one's 40.
+
+A ball that arrives and sticks reads as a bug in the physics rather than as a
+simplification of it, and that is a cost to a demo whose argument is that you
+can watch the model be right.
+
+Three things had to be decided rather than discovered:
+
+- **Restitution acts on the RELATIVE normal velocity at the contact point**, not
+  on the ball's world velocity.  `plateFrame` already subtracts the plate's own
+  motion there, so a plate rising into a falling ball throws it harder and one
+  running away catches it softly, with no extra arithmetic.  That is the
+  difference between a model and a decoration, and it is the same term a
+  deliberate hop would be built on (#34).
+- **The impact is found INSIDE the frame, and that is not a refinement.**
+  Bouncing at the frame boundary reverses the sign of the discretisation error:
+  the ball is found already *below* the surface, having fallen past it since the
+  last sample, so the approach speed read there exceeds the speed it truly
+  arrived at — by up to `g·dt`.  Reflecting that at `e` returns more than was
+  brought in, and the sampling *pumps* the train.  Measured before it was fixed,
+  a ball dropped 50 mm never terminated in 100 s of simulated time; the fixed
+  point is `e·g·dt/(2(1−e))` = 1.28 m/s, so the train climbs to a bouncier state
+  than it started in and stays there.  Interpolating the gap linearly between
+  the frame's two ends errs the safe way — the true gap is concave under
+  gravity, so the chord crosses zero no later than the curve does.  With it,
+  apex heights decay at `e² = 0.884` to within 0.5% on a still plate, and the
+  residual is the apex being a discrete sample rather than slack in the model.
+- **Tangential velocity carries across unchanged, and the reason is better than
+  "we have no spin state".**  A ball that leaves the plate rolling without
+  slipping keeps its spin through the flight, so on landing its contact point is
+  again at rest: no slip, no friction impulse.  Frictionless in the tangential
+  direction is not an assumption here, it is a consequence of the rolling model.
+
+**Three words, and they are not synonyms.**  An **impact** is one contact
+between a flying ball and the plate: the instant the bounce law runs, reported
+as `ContactReport::impact_approach`.  An **arrival** is the ball coming down
+onto an impact — the relative normal speed it brings.  A **landing** is the end
+of the whole train, when the rebound falls under `bounceFloorSpeed` and the ball
+goes back to rolling.  A separation produces one landing and as many impacts as
+the train has bounces, so "the ball landed" and "the ball hit the plate" say
+different things and the code says whichever it means.
+
+**The train terminates by becoming unrepresentable, not by hitting a threshold
+anybody picked.**  `e = 0.94` retains 88% of the energy per bounce, so a train
+runs about `e/(1−e) ≈ 16` times the first flight.  `bounceFloorSpeed` ends it at
+`u < g·dt/2`: a rebound at `u` is airborne for `2u/g`, and below that the whole
+flight fits inside one frame.  It scales with the frame rate rather than with
+the ball — halve `dt` and the simulation resolves half the bounce — and at 60 Hz
+it is 0.082 m/s, a 0.34 mm hop.  The requirement that it must not fire on a ball
+that is genuinely hopping is met by construction rather than by margin.
+
+**Rolling resistance is scaled by that same normal force, not by `g`.**  It is a
+normal-force effect — the contact patch deforms in proportion to how hard the
+surface is pressed — so the retarding acceleration is `c_rr·(N/m)`, and
+`c_rr·g` was only ever the level-plate-at-rest special case.  `derivatives` and
+`stepBall` take it as an argument; `quasiStaticNormalAccel` supplies `g(n·z)`
+for the one caller that cannot have the real thing, the frame where the rates
+are not trustworthy, and for linearising about the flat equilibrium.
+
+The correction is one of principle rather than of magnitude, and it is worth
+being plain about that.  It moves the separation count not at all — the same
+directions either way, and the peak hop by 0.0001 mm — because separation is
+decided by `normalAccel`, which friction does not enter, and because near
+separation `N` is small and so is anything scaled by it.  What it does change
+is the dead band's derivation, from `asin(c_rr)` to `atan(c_rr)`; see below.
+
+Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23).
+
+> **This landed with three suites red; all three are green now, and it took
+> two more tickets to say why.**
+> `test_auto_balance`, `test_trajectory` and `test_attract_mode` all failed on
+> the tree that made the accelerations analytic, and the ticket was explicit
+> that this was on purpose: the fix is independently sound — validated against a
+> central difference on a smooth drive, where a difference *is* valid, and the
+> two agree to four decimals — and it is the baseline every subsequent
+> measurement has to be read against.  What it could not say was *which* of the
+> three failures were the new physics and which were the harnesses.
+>
+> Driving the application's own step answered that.  **Two of the three were the
+> harnesses.**  `test_auto_balance`'s Nominal preset no longer saturates the
+> servos, so the `LqrPreset` blurb "no saturation" is true again — it was the
+> 40-per-cent-fast plate that pushed it onto the stops.  `test_trajectory` keeps
+> the ball at every setting the sliders offer again, for the same reason.
+>
+> **One was real, and it was neither of the two things it looked like.**
+> `test_the_aggressive_preset_recovers_from_every_direction` lost the ball in
+> direction 33 of 180 — 66.0° — rolling it to 293.7 mm against a rim at 280 mm,
+> with no hop involved at all.  The question left for
+> [#29](https://github.com/caliburn-engineering/caliburn/issues/29) was put as a
+> choice between two suspects: the analytic normal force needing a further look,
+> or #19's Aggressive `Q = 150` no longer clearing the bar it was chosen for.
+>
+> It was **neither**.  The plate crossed a Jacobian condition number of 290 and
+> came out of it on a *different assembly*, mirrored — tilting the ball away
+> while the loop asked for the opposite tilt.  The normal force is sound and
+> `Q = 150` is fine; what was wrong was that nothing stopped the command
+> steering the plate through a singularity.  See *Workspace vs. servo box* and
+> *Assembly mode*.  Bounding the retreat by the conditioning took it to 0 of
+> 720 directions under every tuning the UI offers, and the release blocker with
+> it.
+
+> **A separation is a claim about the plate's velocity, so it is only as good
+> as that velocity.**
+> The rates come through the velocity Jacobian, `-J_pose⁻¹ J_alpha`, which
+> amplifies without bound near a singularity: an over-aggressive gain drives
+> the plate to a Jacobian condition number of 2464, and the rates that come
+> back would launch the ball a metre into the air off a 0.26 m/s nudge.  That
+> hop is arithmetic, not physics.  `PlateMotion::rates_trustworthy` carries the
+> credibility and the contact test declines to act without it, using the
+> threshold the application already shows the user — condition 20, where its
+> own readout turns red and says "Poor".  This is #22's lesson again: do not
+> act on a solve you cannot validate.
+
+> **An over-aggressive tuning does not merely overshoot — it takes the ball off
+> the surface.**
+> Q on ball position at 2000 separates the ball in **every one of 720**
+> directions of this sweep, rising 28.7 mm.  Before the ball could leave the
+> plate at all the same tuning looked merely fast, because a glued ball cannot
+> be thrown.  That is the honest ceiling on #19's aggressive preset, and the
+> three tunings the UI offers separate it in none of those 720.
+>
+> **The count went from 17 to 720 when the landing became a bounce, and not
+> because the gain got worse.**  A separation that lasted one frame became one
+> that lasts seconds, and a one-frame separation was invisible to a sweep that
+> samples `SimReport::airborne` at the frame boundary — the ball was leaving all
+> along.  Which also relocates the cause: the sweep settles the ball from
+> 60, −40 mm before it shoves it, and at Q = 2000 the ball separates on frame 11
+> of that *settling*, the same frame in every direction.  What the 720 counts is
+> the tuning throwing the ball while merely centring it, which is a stronger
+> statement about the gain than the disturbance sweep was making.
+>
+> **Re-measured twice, and the claim has lost a half each time.**  The figures
+> this note first carried — 54 of 720, "launches reaching 689 mm" — were the
+> differenced estimator seen through a harness running the plate 40 per cent
+> fast.  Correcting both (#23, #30) left 64 of 720 off the surface, 5 of them
+> off the plate, and a 6.4 mm peak.  Then #29 bounded the plate's own travel by
+> the conditioning of its Jacobian and the **"and off the plate" half went
+> away**: at this disturbance Q = 2000 now keeps the ball in every direction.
+> It was never the gain throwing it off — it was the plate changing assembly
+> mode underneath it, the same defect the aggressive preset's sweep was failing
+> on. What survives is the part that was always about the gain: it lets go of
+> the ball, and a sensible tuning does not.
+
+### The loop may not lift the plate into a bouncing ball
+
+`u_rebound = e·u + p(1 + e)`, where `p` is how fast the plate's contact point
+under the ball is rising.  **`p ≤ 0` gives `u_rebound ≤ e·u` — always** — so the
+bounce can never hand back more than it took; a rising plate always adds energy,
+at 1.94× its own speed at `e = 0.94`.  That is a hard result about the impact
+law rather than a tuning, and it is the whole of the airborne control question.
+
+It has to be, because four airborne control laws were measured against the
+72-direction and 24-setting sweeps and all four were worse than or equal to
+doing nothing: `predictedLanding` with the ball's velocity zeroed (what ships),
+the landing point plus the real velocity, `predictedRest`, and keeping the path
+feedforward through the flight.  They were not four control laws.  `K`'s output
+is a leg *triple*, which is simultaneously tilt (differential) and heave
+(common-mode), and those do different jobs while the ball is in the air — tilt
+aims the normal impulse at landing, heave sets its magnitude.  Feeding a single
+target through `K` leaves their relative phase uncontrolled, so all four were
+different ways of saying nothing about `p`.  The worst of them is the incumbent:
+`predictedLanding` collapses onto the ball at every impact and springs out again
+at every rebound, so a bouncing ball hands the loop a target oscillating at the
+bounce frequency, the plate rises about 0.02 m/s into each arrival, and that
+feeds back roughly 5% per impact against the 12% `e²` takes out.
+
+So the loop is handed a constraint instead of a fifth target.  `holdContactDown`
+lowers the leg command until `p ≤ 0`, along the leg-rate direction `J_v` maps to
+**pure heave** — `J_v⁻¹(0, 0, ż)` — so `φ̇`, `θ̇` and `ω` come out bit for bit
+unchanged and tilt authority is untouched.  A uniform `(1, 1, 1)` nudge would
+have been the obvious reading of "common-mode" and is not the same thing away
+from the symmetric pose.  It fails safe: if the constraint bound every frame the
+worst case would be a plate holding still, which is the incumbent best.
+
+**What it is worth, measured.**  Over a 12 × 12 grid of lap points and shove
+directions at `kMaxNudgeSpeed`, with and without it:
+
+| | balls lost / 144 | peak hop | worst arrival growth |
+|---|---|---|---|
+| without | 6, 7, 3 | 1.29 m | 12× |
+| with | 0, 0, 0 | 0.11 m | 1.8× |
+
+**And where the guarantee is given up.**  `holdContactDown` asks for the leg
+rate that cancels the rise and stops there.  Two saturations can keep the plate
+from delivering it — the servo rate limit (#32), and the retreat into the
+holdable set (#29), which scales the whole triple back toward a level pose that
+sits *higher* than the one being asked for.  Over that sweep, frames where the
+contact point rose faster than 10 mm/s, out of every frame the ball entered
+airborne: Nominal 0 of 2344, Aggressive 70 of 5359 (worst +0.296 m/s), Detuned 0
+of 1871.  Aggressive slams the legs hardest, so it is the tuning that runs the
+servo out of speed.
+
+Pushing the command past the rate the servo can deliver was tried and does not
+work: a leg pinned at `rate_max` does not move faster when its command moves
+further, so a search for a scale that satisfies the constraint walks the command
+to the bottom of the servo travel instead.  The plate ends up flat at its floor
+with no tilt authority left, and the over-aggressive sweep goes from losing none
+of 90 directions to losing all of them.  A constraint the actuator cannot fill
+is a saturation to report, not a command to shout — `SimReport::contact_normal_rate`
+is where it is reported.
+
+**It is not asserted as an apex ratio, and the decision record's D10 asked for
+one.**  `e²` bounds the ratio of successive apex *heights* only over a plate
+that holds still.  With the loop running the plate does not hold still: it
+descends under a ball it has just let go of, so the plate-frame gap grows with
+no energy entering the ball at all.  Measured that way the closed-loop sweep
+reports ratios near 2 with `p` pinned to a thousandth of a metre per second,
+which is the metric failing rather than the mechanism.  The still-plate apex
+ratio is pinned in `test_ball_contact`; the closed loop asserts `p` directly.
+
+Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23),
+against the reasoning recorded as D8, D9 and D10 in
+`docs/plans/2026-09-09-bouncing-ball-control-decisions.md`.
+
+### Losing the ball, and saying so
+
+A lost ball used to be a silent teleport.  `ball_auto_reset_` defaulted **true**
+and `resetBall()` put the ball back at the centre with no banner, no marker and
+no cause — so the demo's most informative moment, the loop losing the ball,
+rendered as the ball blinking back to the middle.  That is
+[#22](https://github.com/caliburn-engineering/caliburn/issues/22)'s failure mode
+exactly: the demo looked fine and was not.
+
+**Auto-reset now defaults off**, and with it off three things happen instead:
+
+- **The simulation stops** on the frame the ball crossed the rim.  A loss is a
+  moment, not a blink, and it is the one thing in this demo a visitor cannot ask
+  to see again.  There is one pause rather than two that can disagree:
+  `plot_state_.paused` IS the simulation's pause — `PlateView::step` returns on
+  it — and the plot panel's own Pause button lifts it as it always did.
+  `paused_by_loss_` only records who set it, so Reset Ball lifts this class's
+  pause and leaves the visitor's alone.
+- **A banner names one cause**, on the contact line that was already being drawn
+  every frame — see *Status badges, and why nothing gets its own line*.
+- **A marker goes on the plots at that instant**, annotating Ball Position and
+  drawing its line across every plot, so the leg commands, the ball height and
+  the condition number can all be read at the frame it happened on.
+
+The checkbox is still there and still does what it used to.  The marker is
+placed either way, so the record survives the case where nobody is asked to read
+it — which is the case it is worth most in.
+
+#### The precedence
+
+One cause, by an order derived from **causality** rather than ranked by
+severity.  Each entry is upstream of the next, so naming the first that is set
+is naming the thing that made the rest possible:
+
+1. **rates untrustworthy** — the arithmetic cannot be believed at all
+2. **workspace-clipped** — the mechanism refused the command
+3. **separated** — the plate left the ball
+4. **saturated** — the servo ran out of travel
+5. **rolled off** — nothing failed; the ball simply went too far
+
+It lives in `lossCause` as a pure function of four booleans read at the crossing
+frame, with no lookback window.  Both of those are decisions with measurements
+behind them, and the measurements are in `lossCause`'s own comment rather than
+here: **why the flags at the crossing frame are enough**, and **why all five
+entries stay when the closed loop inside the offered envelope raises only two of
+them**.  `test_loss_cause` pins the rule over all sixteen inputs, the two scarce
+causes' reachability, and the three branches the application actually reaches.
+
+The pure function is what makes that possible.  Measured, the loop cannot raise
+entry 1 at anything the Nudge buttons compose, so a test that drove only the
+demo would leave the top of the precedence unpinned and nothing would say so.
+
+#### What the named cause is worth, measured after the fact
+
+**Under the closed loop it names the same thing every time.**  Measured across
+three tunings and shove speeds from 1.20 to 5.00 m/s — 1,080 losses, 72
+directions apiece — every one carried the identical flags, `clipped` and
+`saturated`, so every one is reported as `workspace-clipped`.  No reordering of
+the precedence could improve on that, because the input does not vary, and
+moving the anchor earlier does not either: `clipped` is already up by the time
+the ball is 75 mm out.
+
+The cause is mechanical.  `clipped` means the gain asked for a pose the
+mechanism will not hold, and a ball far off centre is a large error, so it is
+raised continuously through any large excursion.  It is a *the loop is working
+hard* signal rather than a fault signal, and second in the precedence it masks
+`separated` and `saturated` permanently.
+
+So what the banner actually discriminates is **who was driving** — the loop
+always reports `workspace-clipped`, the servo sliders report `separated` or
+`rolled off` — which a visitor who reached for the sliders already knows.  The
+parts that carry their weight are the pause, the marker and the hand-driven
+cases; the named cause under the loop does not.
+
+This is pinned by `test_the_closed_loop_reports_one_constant_cause_today`, which
+is a characterisation test rather than a specification: the day it fails is the
+day the diagnosis started discriminating, and this section should be rewritten
+rather than the test relaxed.
+
+**What a discriminating diagnosis would need** is a different signal, not a
+different order.  The candidates, in increasing cost: give `clipped` a magnitude
+threshold so it means *refused by a large margin*; or diagnose the recovery
+rather than the frame, comparing what the loop did against what the plant could
+have done, so it can separate "this shove was beyond any tuning" from "this
+tuning ran out of authority where another would not have".  The second is what
+D14 was reaching for and is a larger feature than #33 described.
+
+#### Where the evidence goes, and why not behind a hover
+
+The banner is a label and the plot annotation is a label plus the raw flags; the
+sentence explaining what the cause means is the only part behind a hover.
+
+That split is not a matter of tidiness.  **A phone has no hover.**  Putting the
+evidence behind one would mean the full picture survives for a reader with a
+mouse and for nobody else, which is not what "survives for anyone who looks"
+means.  So `PlotMarker::note` splits at a blank line: everything before it is
+painted on the plot, everything after is hover-only.  The rule for deciding
+which side a thing goes on is whether a reader has to be able to CHECK it.
+
+Decided in [#33](https://github.com/caliburn-engineering/caliburn/issues/33),
+against D11, D13 and D14 of
+`docs/plans/2026-09-09-bouncing-ball-control-decisions.md`.
+
+### Trajectory tracking
+
+A moving setpoint: circle, square, triangle, or the fixed point the loop has
+always had.  Balancing at the centre proves stability; tracing a shape proves
+*tracking*, and it is far more legible to someone who does not read a
+pole-zero map.
+
+The path writes `sp_x_mm_` / `sp_y_mm_` rather than going round them, so the
+control law is untouched and the sliders become the readout of where the ball
+is being sent — the same arrangement the servo sliders have under the loop.
+Polygons are traversed at constant **speed**, not constant angle: a corner is
+where the interesting behaviour is, and sweeping an angle would crawl through
+it.
+
+**Position on the path is a phase, and the phase is accumulated.**  `pathPoint`
+and `pathVelocity` take a lap fraction in `[0, 1)`; it lives in
+`SimState::path_phase` and `stepSim` advances it by `dt / period_s` each frame,
+which is where a fact one frame hands to the next belongs (#30).  It used to be derived from the
+simulation clock as `t / period_s`, which reads as a pure function of time and
+is not one: changing the lap moves that quantity by `t dT / T^2`, and `t` is the
+whole time the demo has been running.  Measured at 100 s, a nudge of the lap
+slider from 10.0 to 9.5 s threw the setpoint **170 degrees** round the path, and
+the loop hauled the ball across the plate after it.  The size slider did it too,
+indirectly — a bigger path raises the lap floor, which pushes `period_s` up.
+
+Accumulating instead means a lap change alters only the **rate**, from that
+moment on, and a size change slides the setpoint **radially**: same angle,
+bigger shape.  **A shape change re-seeds the phase** rather than carrying it,
+because phase is not comparable across shapes: the circle's phase zero is at +x
+and a polygon's first corner is at the top, so equal phase is a quarter of a lap
+apart — measured, **169.7 mm** between a 120 mm circle and the square, at every
+phase in the lap.  Carrying it threw the target to the far side of the path and
+the loop hauled the ball across after it, into the workspace clip.  `phaseNearest`
+picks the point on the new shape closest to where the setpoint already is, which
+moves it by the least the two shapes allow: 35 mm circle to square, 60 mm circle
+to triangle — exactly the `r/2` a triangle's inradius leaves — and nothing at all
+when the shape does not change.
+
+So all three trajectory controls now keep one promise: **the setpoint never
+jumps.**  The lap changes its speed, the size slides it radially, and the shape
+moves it as little as two different shapes permit.  Two rules go with it, and both live in `setpoint_path.h` rather
+than in the panel so that the tests exercise them rather than their own copies:
+`stepPath` owns the **order** — read the setpoint at the phase the frame opened
+on, advance afterwards, so the position and the velocity handed to the loop are
+the same instant and a polygon cannot straddle a corner between them — and
+`clampPeriod` owns the **lap floor**, applied against the radius just dragged
+rather than the one the last frame copied.  The reference *velocity* still steps on a lap change, which is
+correct — the setpoint really was asked to travel faster — and
+`test_setpoint_path` says so alongside the invariance.  All eight of that
+file's original tests evaluated the path at fixed parameters, which is exactly
+why none of them saw this; the ones added with the fix move a slider mid-run,
+at four run lengths out to 1000 s, because the old error grew with `t` and a
+brief test would have passed against it.
+
+**Velocity feedforward, decided by measurement.**  The reference state has
+always claimed the ball should be at the setpoint *and stationary*, which is
+false the moment the setpoint moves — so the loop spent its effort fighting the
+motion it was asked for.  Measured on a 120 mm circle at a ten-second lap:
+**3.66 mm of mean error with it, 35.52 mm without** — nearly ten times.
+Without it the ball does not follow the circle so much as sit inside it.
+
+**It lives in the loop, as `BallReference`.**  It was applied for a while by
+biasing the *measurement* handed to `legCommand`, from `plate_view` — identical
+arithmetic, since only the difference enters `u = -K(x - x_ref)`, and cheaper
+to write.  What made it wrong was everything around it: `auto_balance.h` went
+on saying the regulator needs no feedforward while the application supplied one
+two files away, and `test_trajectory` carried a third copy of it.  A second
+implementation of the loop inside its own test harness is what let a real bug
+hide once already, in #23.  So `legCommand` takes a reference *state* — where
+the ball should be and how fast the setpoint is going — and there is one
+implementation, in the file whose header describes the contract.
+
+One thing deliberately left duplicated: **when** the reference velocity applies.
+`plate_view` and both closed-loop harnesses each carry the same one-line rule —
+zero it while the ball is airborne, because the plate cannot touch the ball and
+`seen` is already the predicted landing point.  Collapsing it would mean either
+`auto_balance` including `setpoint_path` or the reverse, and a loop that knows
+about paths is a worse trade than a rule stated three times and documented once,
+on `BallReference`.
+
+**It has no gain of its own, and must not be given one.**  The reference
+velocity is multiplied by K's velocity columns, which LQR designs from the
+`x' ball` and `y' ball` weights — so the two sliders that own those numbers
+already set how hard the loop chases a moving setpoint, and the LQR panel says
+so beneath them.  A feedforward slider would be a second opinion about a number
+K owns.  `test_auto_balance` pins both halves: that the reference velocity
+enters as a velocity error, and that raising those two weights raises the
+command a moving setpoint asks for.
+
+The corner survives that: a square is tracked to about 7.8 mm at its corners
+against a circle's 5.1 mm on the same size and lap — half again.  That is a
+bandwidth limit made visible, and it is the point of offering cornered shapes
+at all.
+
+**Half again is the claim; the square's own figure is not.**  It is a peak
+sampled at 60 Hz near the tightest part of the path, so which frame lands
+nearest the corner still moves it a little.  `test_trajectory` asserts the
+ratio for that reason, and a fourth significant figure on the square would be
+a claim about frame alignment rather than about the controller.  It was 14 mm
+and nearly three times before the corners were filleted — see below.
+
+Decided in [#24](https://github.com/caliburn-engineering/caliburn/issues/24).
+
+### Trajectory controls
+
+The four controls the trajectory panel offers — the shape combo, the size
+slider, the lap slider and the setpoint sliders — and the state they act on,
+in `TrajectoryControls`.  `PlateView` holds one and forwards to it.
+
+**It was extracted because the panel had an invariant and kept it by
+convention.**  The path and the setpoint are one piece of state with one promise
+over it — *the setpoint never jumps* — and every rule that keeps that promise is
+a rule about what happens **between** two of its fields: the lap floor applied
+against the radius just dragged, the phase re-seeded rather than carried across
+a shape change, the setpoint sliders being a readout under a path and the input
+under a held point.  Three rules, spelled out at four call sites in
+`plate_view.cpp`, each of which had to remember to refresh the path's radius
+first.  Two of them had already been got wrong once each, and the second time
+shipped: the shape combo carried its phase and threw the setpoint 169.7 mm to
+the far side of the path, found by driving the browser because the combo handler
+is view code.
+
+So the fields are held together and the rules are the methods that move them.
+What is left in the panel is ImGui plus forwarding, and `test_setpoint_path`
+drives the object the panel drives, through the same entry points.
+
+**The two slider floats are gone with it.**  `path_.radius_m` and
+`path_.period_s` are the one representation of the size and the lap; the panel
+casts to a `float` at the widget and hands the answer straight back.  That is
+what makes the stale-radius skew structural rather than remembered — two fields
+that must agree cannot disagree if there is one field.
+
+**The phase is not in it**, because since #30 it is `SimState`'s and `stepSim`
+advances it.  So this type does not drive the setpoint, the step does, and
+`setShape` takes the phase by reference: re-seeding it is the combo's job,
+owning it is the step's.  Which is why it is `TrajectoryControls` and not
+`TrajectoryDriver`.
+
+**What stays untested, written down rather than discovered:** everything between
+an ImGui call and one of these methods — the combo's index-to-`PathShape` cast,
+the mm/metre conversions either side of each slider, which widgets are disabled
+under a path, and the three readouts.  Reaching any of it needs a GL context and
+an ImGui context.  What makes that acceptable is that none of it holds a rule:
+every line is a conversion or a call, and the arithmetic that used to sit
+between them is gone.
+
+Headless `PlateView` was the other option and was refused: a GL context and an
+ImGui context to pin a handful of assignments, with coverage of a lot of
+unrelated UI arriving alongside.
+
+Decided in [#28](https://github.com/caliburn-engineering/caliburn/issues/28).
+
+### Fillet
+
+The circular arc a polygon's corner is filleted with, radius `v^2 / a_max`.
+**Fillet** throughout — in `filletRadius`, in the internals, and in the panel's
+readout.  Not *fillet*, *round* or *smooth*: it is one word for one thing, and
+the synonyms invite a reader to think the velocity is being smoothed, which is
+exactly the thing #31 decided against (see below).
+
+### The corner is filleted, not a step
+
+**A sharp corner puts a step into the reference velocity, and that step is a
+modelling error rather than a demonstration.**  The polygons' corners are
+filleted with a circular fillet of radius `v^2 / a_max`, so the reference is one
+the mechanism can actually track: the setpoint's own acceleration is `a_max`
+through the fillet and zero along the straights, never infinite anywhere.
+
+This reverses half of what #24 wrote on `pathVelocity`, and the words are
+quoted in the header rather than quietly dropped:
+
+> Undefined for an instant at each corner, where the path's velocity is
+> genuinely discontinuous; the value returned there is the edge being left.
+> That is honest — a corner IS a step in the reference velocity, and it is the
+> reason the ball rounds one.
+
+The first sentence stands.  The second does not: the corner-rounding comes from
+the position error against closed-loop bandwidth, not from the velocity step,
+and the step's only other effect was to hand the actuator an impulse through
+K's velocity columns.  That was harmless while the ball was glued to the plate
+(#23) and stopped being harmless when it could be thrown off one.  Measured at
+60 Hz on the fastest square, the sharp reference asked for **21 m/s²** across
+one frame against the **1.89** the plate can give the ball.
+
+**A fillet, not a slew.**  Slewing `pathVelocity` without touching `pathPoint`
+would make the reference velocity stop being the reference position's
+derivative — a new lie in exactly the place one was being removed, and a direct
+violation of `stepPath`'s reason for returning both together.  A circular fillet
+keeps `v = dp/dt` true by construction, and `test_setpoint_path` differences the
+position straight through each corner to say so.
+
+**`a_max = (5/7)·g·sin(theta_max)`, derived rather than chosen.**  `theta_max`
+is the largest tilt the plate can actually hold whose velocity-Jacobian
+condition number stays under `kRatesUntrustworthyAbove` in every direction,
+found by sweeping `condition_number` upward from level.  That reuses the
+threshold this repository has already argued for — the contact model's trust
+bound and the plate panel's own "Poor" line — instead of inventing a second
+opinion about when the mechanism is in trouble, and it makes `a_max` a property
+of the plant that a leg length moves: **1.52 m/s² at 120 mm legs, 1.888 at the
+shipped 150, 2.25 at 180, 2.47 at 210**.  On the shipped geometry `theta_max`
+is **15.63°**.
+
+A leg is required to have a real solution *and* to be within its travel, rather
+than `inverse_kinematics`'s clamp being accepted — a clamped leg triple is a
+different pose from the one whose Jacobian is being asked about, and the
+difference is not academic: evaluated at the clamped triples instead, the
+condition number passes **19 500 at 20°** and falls back under 100 at 22°.
+
+The sweep marches upward to find a bracket and only halves inside it.  A
+bisection over the whole range would assume the predicate is one unbroken run
+from level, and it is a conjunction of a reachability set and a condition
+sublevel set with neither guaranteed convex in tilt.  Measured, it does flip
+exactly once here, so the two agree — the march costs 2.3 ms and does not rely
+on that.
+
+> **#31 expected the condition number to bind, and on this plate it does not.**
+> The ticket says "the workspace maximum is explicitly *not* the answer: the
+> workspace edge is precisely where the condition number blows up".  Measured,
+> the blow-up is real and it sits **1.5° outside the reachable set**: at 150 mm
+> legs the plate runs out of travel at 15.63°, where the condition number is
+> 15.7, and the "under 20" line would not have bound until 17.10°.  So the
+> shipped `a_max` **is** the workspace maximum.
+>
+> The gate is kept, and is not decorative.  Lowering the limit moves the answer
+> at once (15.51° at 15, 13.66° at 10), and it binds outright from about 200 mm
+> legs — at 210 the plate reaches 21.80° and is only to be believed to 20.63°.
+> That is the property it exists for: a longer leg must not buy acceleration by
+> reaching into rates nobody should trust.  `test_setpoint_path` pins both the
+> finding and the two places the gate does bind, so neither can quietly stop
+> being true.
+
+**The fillet is sized by speed, so it grows as the lap tightens.**  On the
+180 mm square it is 33 mm at the fastest lap the sliders offer and 0.6 mm at the
+slowest — #24's bandwidth argument made visible in the *target* instead of
+inferred from the ball's overshoot.  It is capped at the polygon's inradius,
+where the fillets meet and the shape becomes its own incircle; nothing the
+sliders reach comes near that (33 mm against a 127 mm cap).
+
+Three things move with it, and all three had to:
+
+- **`pathOutline` draws the fillet.**  A square drawn with sharp corners over a
+  setpoint that rounds them is a picture of a path the ball is not being sent
+  round, and the visitor would read the gap as the controller failing at the
+  corner rather than as the corner not being there.
+- **`pathLength` shrinks, and so does the lap floor.**  A fillet gives up two
+  tangent lengths and gets back a shorter arc, so the 180 mm square's fastest
+  offered lap moves from 4.07 s to 3.85 s.  `minPeriod` cannot ask `pathLength`
+  for that — the length depends on the lap — so it solves the fixed point in
+  closed form at the speed cap, where the fillet radius is known.
+- **`phaseNearest` considers the arcs.**  The nearest point on a fillet is very
+  often in the middle of one, so a walk that only offered the straights would be
+  wrong by up to the fillet radius.
+
+**A filleted polygon does not quite reach its `radius_m`**, since the fillet cuts
+the corner off: 14 mm short for the 180 mm square at its floor, 33 mm for the
+triangle, whose sharper corner gives up its whole fillet radius.  The size slider
+is still measured from the corner, because the corner is what the shape is.
+
+**`accel_max` is a property of the plant, and `stepSim` stamps it.**  The step
+overwrites whatever a caller left on `SimInput::path` with the plate's own
+`maxBallAccel()`, so no harness can measure a reference the plate could never
+have followed and none has to remember to ask — the same reasoning that puts the
+travel clamp in the plant rather than in the controller.  `accel_max = 0` is
+still reachable and is exactly the sharp reference this code drove before; it is
+kept because it is what the fillet is measured against, not because it is a
+setting anyone should ship.
+
+What it bought, over the 24 path settings the sliders offer: the worst mean
+tracking error fell from **36 mm to 21 mm**, the ball's widest reach from 195 mm
+to 192 mm, and the square's corner peak from 14 mm to 7.8 mm.  None of those is
+the point — the point is that the reference stopped demanding infinite
+acceleration — and all three are consequences of it.
+
+Decided in [#31](https://github.com/caliburn-engineering/caliburn/issues/31),
+from the decision record's D1–D5.
+
+> **The sliders are bounded, and there are two bounds because there are two
+> ways to ask for the impossible.**
+> `kMaxSetpointSpeed` (250 mm/s) binds the large paths — beyond about 400 mm/s
+> the plate loses the ball outright — and `kMinLapSeconds` (2 s) binds the
+> small ones, where 250 mm/s round a 20 mm circle is a half-second lap and an
+> angular rate the plate cannot follow however short the distance.  Neither
+> implies the other.  A demo whose controls include a setting that breaks it is
+> not offering a choice, it is offering a trap.
+>
+> **Both figures were measured against a reference that slammed the legs at
+> every corner, and neither has been re-measured since #31 filleted them.**
+> What has been re-measured is the sweep the cap exists to protect: all 24
+> offered settings keep the ball, and it now reaches 192 mm rather than 195.
+> Whether the cap itself can come up belongs to the ticket that closes #23,
+> which owns re-measuring it (D16).  The numbers are left standing rather than
+> quietly adjusted, because a bound whose stated reason has moved is worth
+> noticing.
+
+### Rolling-friction dead band
+
+`RollingBallDynamics` opposes motion with `c_rr * (N/m) * sign(v)`, so a plate
+tilted by less than `atan(c_rr) = 0.573 deg` **cannot start the ball moving at
+all**: the tangential pull is `g sin(t)` and the resistance `c_rr g cos(t)`, so
+the band closes where `tan(t) = c_rr`.
+
+The derivation moved with #23 and the number did not.  Before the normal force
+was computed, the resistance was scaled by `g` outright, which put the edge at
+`asin(c_rr)` instead — 0.5729673 deg against 0.5729387 deg, a difference of
+2.9e-5 deg, or one twenty-thousandth of the tolerance the test pins it to.  The
+two agree to four decimals for any `c_rr` this small, so no test number changed;
+what changed is which of them is *true*.  A state feedback has no integral term and therefore no way out: it
+parks the ball wherever the tilt it is asking for falls inside the band.
+
+This is not modelled in the linear plant at all, and it is why the LQR designer
+does not open on unit weights.  Under `Q = R = I` the residual is 37 mm off
+centre with the plate sitting at the dead-band edge — a loop that looks broken
+while behaving exactly as designed.  The residual scales inversely with the
+position gain, so the shipped default weights the ball position and lands
+inside 2 mm.  Both the good case and the dead band itself are pinned by
+`tests/test_auto_balance.cpp`; the number is not a memory.
+
+> **Not "stiction" and not "the loop has steady-state error".**
+> Stiction is a break-away force distinct from the sliding one, which this
+> model does not have.  And a steady-state error suggests a gain that could be
+> raised until it goes away — the band is a *region* of equilibria, and inside
+> it the loop is not converging slowly, it is not moving.

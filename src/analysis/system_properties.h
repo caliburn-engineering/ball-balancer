@@ -1,7 +1,7 @@
 // src/analysis/system_properties.h
 #pragma once
 
-#include "../linear_system.h"
+#include "linear_system.h"
 #include <Eigen/Core>
 
 namespace caliburn {

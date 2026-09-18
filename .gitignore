@@ -1,4 +1,4 @@
-# projects/linear-analyzer/.gitignore
+# projects/ball-balancer/.gitignore
 build/
 .cache/
 imgui.ini

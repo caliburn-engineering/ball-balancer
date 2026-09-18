@@ -54,7 +54,7 @@ void test_parse_empty() {
 
 void test_builtin_models() {
     auto models = caliburn::getBuiltinModels();
-    ASSERT_TRUE(models.size() >= 6);
+    ASSERT_TRUE(models.size() >= 7);
 
     // First-Order: 1 state, 1 input, 1 output
     ASSERT_EQ(models[0].system.states(), 1);
@@ -71,20 +71,34 @@ void test_builtin_models() {
     ASSERT_EQ(models[2].system.inputs(), 2);
     ASSERT_EQ(models[2].system.outputs(), 2);
 
-    // Inverted Pendulum: 4 states, 1 input, 2 outputs
-    ASSERT_EQ(models[3].system.states(), 4);
-    ASSERT_EQ(models[3].system.inputs(), 1);
-    ASSERT_EQ(models[3].system.outputs(), 2);
+    // Ball-Balancer Cascade: 7 states, 3 leg inputs, 5 outputs
+    ASSERT_EQ(models[3].system.states(), 7);
+    ASSERT_EQ(models[3].system.inputs(), 3);
+    ASSERT_EQ(models[3].system.outputs(), 5);
 
-    // Quarter-Car: 4 states, 1 input, 2 outputs
+    // Inverted Pendulum: 4 states, 1 input, 2 outputs
     ASSERT_EQ(models[4].system.states(), 4);
     ASSERT_EQ(models[4].system.inputs(), 1);
     ASSERT_EQ(models[4].system.outputs(), 2);
 
-    // Double Mass-Spring: 4 states, 1 input, 2 outputs
+    // Quarter-Car: 4 states, 1 input, 2 outputs
     ASSERT_EQ(models[5].system.states(), 4);
     ASSERT_EQ(models[5].system.inputs(), 1);
     ASSERT_EQ(models[5].system.outputs(), 2);
+
+    // Double Mass-Spring: 4 states, 1 input, 2 outputs
+    ASSERT_EQ(models[6].system.states(), 4);
+    ASSERT_EQ(models[6].system.inputs(), 1);
+    ASSERT_EQ(models[6].system.outputs(), 2);
+}
+
+// The startup preset is resolved by name, so inserting a model cannot
+// silently change which plant the application opens on.
+void test_default_model_is_the_cascade() {
+    auto models = caliburn::getBuiltinModels();
+    const int idx = caliburn::defaultModelIndex(models);
+    ASSERT_TRUE(idx >= 0 && idx < (int)models.size());
+    ASSERT_TRUE(models[idx].name == "Ball-Balancer Cascade");
 }
 
 int main() {
@@ -96,6 +110,7 @@ int main() {
     test_parse_ragged_rows();
     test_parse_empty();
     test_builtin_models();
+    test_default_model_is_the_cascade();
     std::printf("All model_library tests passed.\n");
     return 0;
 }

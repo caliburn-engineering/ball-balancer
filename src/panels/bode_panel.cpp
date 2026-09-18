@@ -69,13 +69,13 @@ void plotBodeSingle(const char* suffix, AppState& state, float plot_h, int margi
             std::snprintf(mag_id, sizeof(mag_id), "Magnitude [dB]  |  GM = %.1f dB @ %.2f Hz%s",
                           ms.gain_margin_db, ms.phase_crossover_hz, suffix);
         else
-            std::snprintf(mag_id, sizeof(mag_id), "Magnitude [dB]  |  GM = \xe2\x88\x9e%s", suffix);
+            std::snprintf(mag_id, sizeof(mag_id), "Magnitude [dB]  |  GM = inf%s", suffix);
 
         if (ms.gain_crossover_hz > 0)
             std::snprintf(phase_id, sizeof(phase_id), "Phase [deg]  |  PM = %.1f\xc2\xb0 @ %.2f Hz%s",
                           ms.phase_margin_deg, ms.gain_crossover_hz, suffix);
         else
-            std::snprintf(phase_id, sizeof(phase_id), "Phase [deg]  |  PM = \xe2\x88\x9e%s", suffix);
+            std::snprintf(phase_id, sizeof(phase_id), "Phase [deg]  |  PM = inf%s", suffix);
     } else {
         std::snprintf(mag_id, sizeof(mag_id), "Magnitude [dB]%s", suffix);
         std::snprintf(phase_id, sizeof(phase_id), "Phase [deg]%s", suffix);
@@ -155,7 +155,7 @@ void plotBodeSingle(const char* suffix, AppState& state, float plot_h, int margi
     // --- Phase ---
     if (ImPlot::BeginPlot(phase_id, ImVec2(-1, plot_h))) {
         ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Log10);
-        ImPlot::SetupAxes("Frequency [Hz]", "\xe2\x88\xa0G [\xc2\xb0]");
+        ImPlot::SetupAxes("Frequency [Hz]", "arg G [\xc2\xb0]");
         ImPlot::SetupAxisLimits(ImAxis_X1, state.freq_min_hz, state.freq_max_hz,
                                 ImPlotCond_Always);
         ImPlot::SetupAxisLimits(ImAxis_Y1, ph_lo, ph_hi, ImPlotCond_Always);
@@ -278,16 +278,11 @@ void drawBodePanel(AppState& state) {
     }
     if (freq_changed) state.needs_recompute = true;
 
-    // A suppressed trace must be distinguishable from breakage, so the reason
-    // is drawn BEFORE the plots — they consume GetContentRegionAvail(), and
-    // anything after them is clipped out of the panel entirely.
-    for (int s = 0; s < NUM_SYSTEMS; ++s) {
-        if (s == 2 || state.channel_reason[s].empty()) continue;
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.35f, 1.0f));
-        ImGui::TextWrapped("%s suppressed \xe2\x80\x94 %s", system_names[s],
-                           state.channel_reason[s].c_str());
-        ImGui::PopStyleColor();
-    }
+    // Drawn BEFORE the plots — they consume GetContentRegionAvail(), and
+    // anything after them is clipped out of the panel entirely.  Which is also
+    // why this is one fixed line rather than none, one or two: a line that came
+    // and went here would resize the plot underneath it.
+    drawSuppressedTraces(state.channel_reason, system_names, NUM_SYSTEMS, 2);
 
 
     if (state.show_all_channels) {

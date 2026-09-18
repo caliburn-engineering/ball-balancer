@@ -1,7 +1,7 @@
 // src/analysis/loop_locus.h
 #pragma once
 
-#include "../linear_system.h"
+#include "linear_system.h"
 #include "controller_builders.h"
 #include "pole_zero.h"
 

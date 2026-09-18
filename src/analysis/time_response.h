@@ -1,7 +1,7 @@
 // src/analysis/time_response.h
 #pragma once
 
-#include "../linear_system.h"
+#include "linear_system.h"
 #include <Eigen/Core>
 #include <vector>
 

@@ -404,6 +404,209 @@ static void drawPairingGrid(AppState& state) {
     }
 }
 
+// The LQR design surface: state weights, input weights, the resulting gain,
+// and where it put the closed-loop poles.  No Design button — the gain is
+// re-solved on every recompute, so dragging a weight moves K and the poles
+// together, which is the point of designing this way rather than by hand.
+//
+// LQR needs the full state vector.  The simulator has it; a physical plate
+// would need an observer.  That is a documented limitation, not a defect.
+//
+// `is_cascade` is passed in rather than inferred, because a plant is
+// identified by its NAME and this function cannot see one.  `7 states, 3
+// inputs` is a shape, and shapes coincide — see `isCascadeModel`.  The state
+// labels below still key on shape, which is a weaker claim they were always
+// making; the presets are a claim about a particular ball and need the
+// stronger one.
+static void drawLqrDesigner(AppState& state, bool is_cascade) {
+    const int n = state.plant.states();
+    const int m = state.plant.inputs();
+    if (state.lqr_q.size() != n || state.lqr_r.size() != m) {
+        ImGui::TextDisabled("Sizing weights to the plant...");
+        state.needs_recompute = true;
+        return;
+    }
+
+    // State names, where the plant is one we know the physical reading of.
+    // Anonymous x0..xn-1 otherwise: inventing labels for an arbitrary plant
+    // would be worse than admitting we do not know them.
+    static const char* kCascadeStates[7] = {
+        "\xce\xb4\xce\xb1\xe2\x82\x81 leg 1", "\xce\xb4\xce\xb1\xe2\x82\x82 leg 2",
+        "\xce\xb4\xce\xb1\xe2\x82\x83 leg 3", "x  ball", "y  ball",
+        "x' ball", "y' ball"};
+    const bool named = (n == 7 && m == 3);
+
+    // --- Preset tunings (#19) ---
+    // Three named tunings, first, because they are the fastest route from "I
+    // have never seen a weighting matrix" to "controller design changes what
+    // the ball does".  Flipping between Detuned and Aggressive teaches more in
+    // five seconds than the sliders below teach in five minutes; the sliders
+    // are what somebody does next, not what they do first.
+    //
+    // Offered only for the cascade, by name.  A preset is a claim about how a
+    // particular ball behaves, and there is no such claim to make about some
+    // other plant that happens to have seven states and three inputs — which
+    // is all the `named` flag below ever established.
+    if (is_cascade) {
+        ImGui::TextDisabled("Tunings - one plant, three designs");
+        const auto& presets = lqrPresets();
+        const int active = activePreset(state.lqr_q, state.lqr_r);
+
+        for (int i = 0; i < static_cast<int>(presets.size()); ++i) {
+            if (i > 0) ImGui::SameLine();
+            const bool on = (i == active);
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button,
+                                          ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            if (ImGui::Button(presets[i].name)) {
+                state.lqr_q = presetStateWeights(presets[i], n);
+                state.lqr_r = presetInputWeights(presets[i], m);
+                state.needs_recompute = true;
+            }
+            if (on) ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Q on ball position %.0f, on ball velocity "
+                                  "%.0f, R %.0f\n\n%s",
+                                  presets[i].q_position, presets[i].q_velocity,
+                                  presets[i].r, presets[i].blurb);
+        }
+
+        // Fixed height, wrapped: the blurbs are different lengths and this
+        // panel is narrow, so an unreserved line would move every slider below
+        // it by a row at the exact moment somebody was reaching for one.  Two
+        // lines is what the longest blurb takes at the docked width; the
+        // tooltip above carries the whole text whatever the panel is doing.
+        ImGui::BeginChild("lqr_preset_blurb", ImVec2(0.0f,
+                          ImGui::GetTextLineHeightWithSpacing() * 2.0f), false,
+                          ImGuiWindowFlags_NoScrollbar |
+                          ImGuiWindowFlags_NoScrollWithMouse);
+        // No preset matches once a slider has been dragged, which is the
+        // honest reading: the weights below are still whatever the user made
+        // them, and the buttons are an offer rather than a mode.
+        if (active >= 0) ImGui::TextWrapped("%s", presets[active].blurb);
+        else ImGui::TextDisabled("custom weights");
+        ImGui::EndChild();
+        ImGui::Spacing();
+    }
+
+    ImGui::TextDisabled("Q - how much each state deviation costs");
+    bool changed = false;
+    char label[64];
+    for (int i = 0; i < n; ++i) {
+        double v = state.lqr_q(i);
+        float f = static_cast<float>(v);
+        if (named) std::snprintf(label, sizeof(label), "%s##q%d", kCascadeStates[i], i);
+        else       std::snprintf(label, sizeof(label), "x%d##q%d", i, i);
+        if (ImGui::SliderFloat(label, &f, 0.01f, 1000.0f, "%.2f",
+                               ImGuiSliderFlags_Logarithmic)) {
+            state.lqr_q(i) = f;
+            changed = true;
+        }
+    }
+
+    // What the last two sliders ALSO do, said where they are rather than left
+    // for a visitor to deduce.  The trajectory feedforward has no gain of its
+    // own — the path's velocity enters as a reference velocity and is
+    // multiplied by K's velocity columns, which LQR designs from exactly these
+    // two weights.  So the strength of the feedforward is set here, from
+    // controls that would otherwise say nothing about it, and the alternative
+    // — a feedforward slider — would be a second opinion about a number K
+    // already owns.  Asserted in `test_auto_balance`; see #24.
+    if (is_cascade) {
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("x' and y' also set how hard the loop chases a "
+                           "MOVING setpoint: a path's own velocity enters the "
+                           "reference and is multiplied by these columns of K. "
+                           "The trajectory feedforward has no separate gain.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("R - how expensive each input is");
+    for (int j = 0; j < m; ++j) {
+        float f = static_cast<float>(state.lqr_r(j));
+        if (named) std::snprintf(label, sizeof(label), "leg %d cmd##r%d", j + 1, j);
+        else       std::snprintf(label, sizeof(label), "u%d##r%d", j, j);
+        if (ImGui::SliderFloat(label, &f, 0.001f, 1000.0f, "%.3f",
+                               ImGuiSliderFlags_Logarithmic)) {
+            state.lqr_r(j) = f;
+            changed = true;
+        }
+    }
+    if (changed) state.needs_recompute = true;
+
+    // Only where there are no presets to reset TO.  On the cascade, Nominal
+    // above IS this button — a second control doing the same thing would only
+    // raise the question of how they differ.
+    if (!is_cascade) {
+        ImGui::Spacing();
+        if (ImGui::Button("Reset weights")) {
+            // Back to the tuning the application opens on, not to unit
+            // weights: on this plant those park the ball in the
+            // rolling-friction dead band, 37 mm off centre.  See
+            // defaultLqrStateWeights.
+            state.lqr_q = defaultLqrStateWeights(n);
+            state.lqr_r = defaultLqrInputWeights(m);
+            state.needs_recompute = true;
+        }
+    }
+
+    // --- Result ---
+    ImGui::SeparatorText("Gain");
+    if (!state.lqr_result.success) {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "LQR failed");
+        ImGui::TextWrapped("%s", state.lqr_result.error.c_str());
+        return;
+    }
+
+    ImGui::Text("K (%d x %d), u = -Kx",
+                (int)state.lqr_result.K.rows(), (int)state.lqr_result.K.cols());
+    if (ImGui::BeginTable("lqr_K", (int)state.lqr_result.K.cols() + 1,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("row");
+        for (int j = 0; j < state.lqr_result.K.cols(); ++j) {
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("x%d", j);
+        }
+        for (int i = 0; i < state.lqr_result.K.rows(); ++i) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("u%d", i);
+            for (int j = 0; j < state.lqr_result.K.cols(); ++j) {
+                ImGui::TableNextColumn();
+                ImGui::Text("%+.3f", state.lqr_result.K(i, j));
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::SeparatorText("Closed-loop poles");
+    double slowest = 0.0;
+    bool stable = true;
+    for (const auto& pole : state.lqr_result.closed_loop_poles) {
+        if (pole.real() >= 0.0) stable = false;
+        if (slowest == 0.0 || pole.real() > slowest) slowest = pole.real();
+    }
+    for (const auto& pole : state.lqr_result.closed_loop_poles) {
+        if (std::abs(pole.imag()) < 1e-9)
+            ImGui::Text("  %+.3f", pole.real());
+        else
+            ImGui::Text("  %+.3f %s %.3fj", pole.real(),
+                        pole.imag() < 0 ? "-" : "+", std::abs(pole.imag()));
+    }
+    if (stable) {
+        // The slowest pole sets how long the ball takes to settle, which is
+        // the number the 3D view makes visible.
+        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f),
+                           "Stable - slowest pole %.3f (settles ~%.1f s)",
+                           slowest, 4.0 / std::abs(slowest));
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                           "Closed loop is NOT stable");
+    }
+}
+
 void drawModelPanel(AppState& state, const std::vector<ModelEntry>& presets) {
     ImGui::Begin("Model Configuration");
 
@@ -592,10 +795,15 @@ void drawModelPanel(AppState& state, const std::vector<ModelEntry>& presets) {
 
     // --- Controller section ---
     ImGui::SeparatorText("Controller");
+    // Index-coupled to ControllerType.  IM_ARRAYSIZE rather than a literal:
+    // the previous hardcoded 5 would have hidden any member added here.
     const char* ctrl_types[] = {"None", "PID", "Lead/Lag",
-                                "State-Space", "Gain Matrix K"};
+                                "State-Space", "Gain Matrix K", "LQR"};
+    static_assert(IM_ARRAYSIZE(ctrl_types) ==
+                      static_cast<int>(ControllerType::LQR) + 1,
+                  "ctrl_types is index-coupled to ControllerType");
     int ctrl_idx = static_cast<int>(state.ctrl_type);
-    if (ImGui::Combo("Type", &ctrl_idx, ctrl_types, 5)) {
+    if (ImGui::Combo("Type", &ctrl_idx, ctrl_types, IM_ARRAYSIZE(ctrl_types))) {
         state.ctrl_type = static_cast<ControllerType>(ctrl_idx);
         state.needs_recompute = true;
         const bool lb = state.ctrl_type == ControllerType::PID ||
@@ -666,6 +874,10 @@ void drawModelPanel(AppState& state, const std::vector<ModelEntry>& presets) {
             if (drawMatrixSliders("K", state.ctrl_K, state.K_text, sizeof(state.K_text)))
                 state.needs_recompute = true;
         }
+    } else if (state.ctrl_type == ControllerType::LQR) {
+        drawLqrDesigner(state, state.preset_index >= 0 &&
+                               state.preset_index < (int)presets.size() &&
+                               isCascadeModel(presets[state.preset_index]));
     }
 
     // --- Channel selector ---
@@ -709,8 +921,9 @@ void drawModelPanel(AppState& state, const std::vector<ModelEntry>& presets) {
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
     if (ImGui::Button("Reset All", ImVec2(-1, 0))) {
         state = AppState{};
-        state.plant = presets[0].system;
-        state.current_params = presets[0].params;
+        state.preset_index = defaultModelIndex(presets);
+        state.plant = presets[state.preset_index].system;
+        state.current_params = presets[state.preset_index].params;
         matrixToTextBuf(state.plant.A, state.A_text, sizeof(state.A_text));
         matrixToTextBuf(state.plant.B, state.B_text, sizeof(state.B_text));
         matrixToTextBuf(state.plant.C, state.C_text, sizeof(state.C_text));

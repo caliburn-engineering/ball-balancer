@@ -5,8 +5,87 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 namespace caliburn {
+
+/// The colour a warning badge is drawn in.  One definition, because a warning
+/// that is a different yellow in two panels reads as two different kinds of
+/// warning.
+inline const ImVec4 kBadgeWarn(1.0f, 0.8f, 0.2f, 1.0f);
+inline const ImVec4 kBadgeBad(1.0f, 0.35f, 0.35f, 1.0f);
+inline const ImVec4 kBadgeGood(0.3f, 1.0f, 0.3f, 1.0f);
+
+/// A condition-dependent message, appended to the line just drawn rather than
+/// given a line of its own.
+///
+/// **The rule: text that comes and goes must never change the layout's
+/// height.**  A warning on its own line pushes every control below it down
+/// while it is showing and lets them snap back when it stops — and these
+/// conditions flicker at frame rate, so a slider a visitor is reaching for
+/// moves out from under the cursor.  Two warnings that can appear
+/// independently make it worse: the panel below them has three different
+/// resting positions.
+///
+/// So a badge attaches to a line that is always there.  It costs no vertical
+/// space at all, it cannot reflow anything, and the line it rides on is
+/// usually the reading the warning qualifies — `error: 178.2 mm  clipped` says
+/// in one line that the error is large AND why the loop is not closing it.
+///
+/// Keep `label` to a word or two: it shares a line, and a badge that wraps has
+/// reintroduced exactly the problem it exists to solve.  The sentence explaining
+/// what the condition means goes in `explain`, which is shown on hover.
+///
+/// The other half of the rule, which no helper can enforce: where a message is
+/// one of several alternatives, draw ALL branches, so the line exists whichever
+/// is true.  A trailing `else` with a disabled "nothing to report" is not
+/// clutter, it is what keeps the panel still.  See `drawBallControls`.
+inline void statusBadge(const char* label, const ImVec4& colour,
+                        const char* explain) {
+    ImGui::SameLine();
+    ImGui::TextColored(colour, "%s", label);
+    if (explain && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted(explain);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
+/// "Which traces are missing from this plot, and on purpose."  One line,
+/// always, whatever is suppressed.
+///
+/// This one matters more than an ordinary badge line, because of where it
+/// sits.  The reasons have to be drawn BEFORE the plot — a plot consumes
+/// `GetContentRegionAvail()`, so anything after it is clipped out of the panel
+/// entirely — which means a line that comes and goes here does not merely
+/// shift the controls below it.  It resizes the plot: the axes rescale and the
+/// whole curve moves, for a reason the reader cannot see.
+///
+/// A suppressed trace must still be distinguishable from a broken one, so the
+/// trace's name is shown in the warning colour rather than hidden.  Only the
+/// sentence saying WHY moves to the hover, where there is room for it to be a
+/// sentence rather than a truncated fragment.
+///
+/// `skip` is the index of a system that never reports a reason; pass -1 for
+/// none.
+inline void drawSuppressedTraces(const std::string* reasons,
+                                 const char* const* names,
+                                 int n, int skip) {
+    ImGui::TextDisabled("suppressed:");
+    bool any = false;
+    for (int s = 0; s < n; ++s) {
+        if (s == skip || reasons[s].empty()) continue;
+        statusBadge(names[s], ImVec4(1.0f, 0.75f, 0.35f, 1.0f),
+                    reasons[s].c_str());
+        any = true;
+    }
+    if (!any) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("none");
+    }
+}
 
 inline void drawHelpMarker(const char* desc) {
     ImGui::SameLine();

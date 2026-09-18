@@ -1,6 +1,6 @@
-# projects/linear-analyzer/CMakeLists.txt
+# projects/ball-balancer/CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(linear-analyzer LANGUAGES C CXX)
+project(ball-balancer LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +17,12 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 include(FetchContent)
+
+# --- Shared reference implementations ---
+# Golden-source C++ living in the Caliburn workspace, not in this repo.  Every
+# project sits at the same depth under projects/, which is why ball-balancer's
+# sources moved here without touching a single relative include.
+set(CALIBURN_REFERENCE ${CMAKE_CURRENT_SOURCE_DIR}/../../reference)
 
 # --- Eigen ---
 FetchContent_Declare(eigen
@@ -92,7 +98,7 @@ target_link_libraries(implot PUBLIC imgui)
 
 # --- Analysis library ---
 add_library(analysis_lib STATIC
-    src/rk4.cpp
+    ${CALIBURN_REFERENCE}/integrators/rk4.cpp
     src/analysis/model_library.cpp
     src/analysis/system_properties.cpp
     src/analysis/frequency_response.cpp
@@ -104,8 +110,44 @@ add_library(analysis_lib STATIC
     src/analysis/loop_locus.cpp
     src/analysis/lqr.cpp
 )
-target_include_directories(analysis_lib PUBLIC src)
-target_link_libraries(analysis_lib PUBLIC Eigen3::Eigen)
+target_include_directories(analysis_lib PUBLIC
+    src
+    ${CALIBURN_REFERENCE}/models       # linear_system.h, linearizer.h
+    ${CALIBURN_REFERENCE}/integrators  # rk4.h
+)
+target_link_libraries(analysis_lib PUBLIC Eigen3::Eigen kinematics)
+
+# --- Plate libraries ---
+# Both targets, since issue #15: the kinematics, the rolling dynamics and the
+# linearised plant are Eigen and the standard library only, so nothing here
+# needed porting — only the renderer's shaders did.
+add_library(kinematics STATIC
+    src/table_kinematics.cpp
+    src/trajectory_validator.cpp
+)
+target_include_directories(kinematics PUBLIC src)
+target_link_libraries(kinematics PUBLIC Eigen3::Eigen)
+
+add_library(ball_dynamics STATIC
+    src/attract_mode.cpp
+    src/ball_contact.cpp
+    src/setpoint_path.cpp
+    src/trajectory_controls.cpp
+    src/sim_step.cpp
+    src/loss_cause.cpp
+    src/auto_balance.cpp
+    src/ball_sim.cpp
+    src/ball_plant_linear.cpp
+    src/comparison_sim.cpp
+    ${CALIBURN_REFERENCE}/simulation/rolling_dynamics.cpp
+    ${CALIBURN_REFERENCE}/models/linearizer.cpp
+)
+target_include_directories(ball_dynamics PUBLIC
+    src
+    ${CALIBURN_REFERENCE}/simulation
+)
+# analysis_lib carries rk4 and LinearSystem for both halves of the app.
+target_link_libraries(ball_dynamics PUBLIC analysis_lib kinematics)
 
 # --- Tests (desktop only) ---
 if(NOT EMSCRIPTEN)
@@ -155,6 +197,51 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(test_lqr PRIVATE analysis_lib)
     target_include_directories(test_lqr PRIVATE tests)
     add_test(NAME test_lqr COMMAND test_lqr)
+
+    add_executable(test_cascade_model tests/test_cascade_model.cpp)
+    target_link_libraries(test_cascade_model PRIVATE analysis_lib)
+    target_include_directories(test_cascade_model PRIVATE tests)
+    add_test(NAME test_cascade_model COMMAND test_cascade_model)
+
+    add_executable(test_ball_sim tests/test_ball_sim.cpp)
+    target_link_libraries(test_ball_sim PRIVATE ball_dynamics)
+    target_include_directories(test_ball_sim PRIVATE tests)
+    add_test(NAME test_ball_sim COMMAND test_ball_sim)
+
+    add_executable(test_auto_balance tests/test_auto_balance.cpp)
+    target_link_libraries(test_auto_balance PRIVATE ball_dynamics)
+    target_include_directories(test_auto_balance PRIVATE tests)
+    add_test(NAME test_auto_balance COMMAND test_auto_balance)
+
+    add_executable(test_trajectory tests/test_trajectory.cpp)
+    target_link_libraries(test_trajectory PRIVATE ball_dynamics)
+    target_include_directories(test_trajectory PRIVATE tests)
+    add_test(NAME test_trajectory COMMAND test_trajectory)
+
+    add_executable(test_setpoint_path tests/test_setpoint_path.cpp)
+    target_link_libraries(test_setpoint_path PRIVATE ball_dynamics)
+    target_include_directories(test_setpoint_path PRIVATE tests)
+    add_test(NAME test_setpoint_path COMMAND test_setpoint_path)
+
+    add_executable(test_ball_contact tests/test_ball_contact.cpp)
+    target_link_libraries(test_ball_contact PRIVATE ball_dynamics)
+    target_include_directories(test_ball_contact PRIVATE tests)
+    add_test(NAME test_ball_contact COMMAND test_ball_contact)
+
+    add_executable(test_assembly_mode tests/test_assembly_mode.cpp)
+    target_link_libraries(test_assembly_mode PRIVATE ball_dynamics)
+    target_include_directories(test_assembly_mode PRIVATE tests)
+    add_test(NAME test_assembly_mode COMMAND test_assembly_mode)
+
+    add_executable(test_loss_cause tests/test_loss_cause.cpp)
+    target_link_libraries(test_loss_cause PRIVATE ball_dynamics)
+    target_include_directories(test_loss_cause PRIVATE tests)
+    add_test(NAME test_loss_cause COMMAND test_loss_cause)
+
+    add_executable(test_attract_mode tests/test_attract_mode.cpp)
+    target_link_libraries(test_attract_mode PRIVATE ball_dynamics)
+    target_include_directories(test_attract_mode PRIVATE tests)
+    add_test(NAME test_attract_mode COMMAND test_attract_mode)
 endif()
 
 # --- Visualizer executable ---
@@ -166,10 +253,22 @@ add_executable(visualizer
     src/panels/bode_panel.cpp
     src/panels/nyquist_panel.cpp
     src/panels/time_response_panel.cpp
+    src/plate_view.cpp
+    src/renderer.cpp
+    src/plot_panel.cpp
+    src/comparison_panel.cpp
 )
 
 if(EMSCRIPTEN)
-    target_link_libraries(visualizer PRIVATE analysis_lib imgui implot)
+    # GLFW, the GL headers and the ES 3.0 entry points all come from Emscripten
+    # ports, so the web link needs no glad and no OpenGL::GL.
+    target_link_libraries(visualizer PRIVATE
+        analysis_lib
+        ball_dynamics
+        kinematics
+        imgui
+        implot
+    )
     target_link_options(visualizer PRIVATE
         -sUSE_GLFW=3
         -sUSE_WEBGL2=1
@@ -184,6 +283,8 @@ else()
     find_package(OpenGL REQUIRED)
     target_link_libraries(visualizer PRIVATE
         analysis_lib
+        ball_dynamics
+        kinematics
         imgui
         implot
         glad

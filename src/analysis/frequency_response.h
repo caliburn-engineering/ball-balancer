@@ -1,7 +1,7 @@
 // src/analysis/frequency_response.h
 #pragma once
 
-#include "../linear_system.h"
+#include "linear_system.h"
 #include <Eigen/Core>
 #include <complex>
 #include <limits>

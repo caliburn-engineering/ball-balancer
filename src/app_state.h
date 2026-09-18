@@ -2,9 +2,11 @@
 #pragma once
 
 #include "linear_system.h"
+#include "auto_balance.h"
 #include "analysis/controller_builders.h"
 #include "analysis/frequency_response.h"
 #include "analysis/loop_diagnostics.h"
+#include "analysis/lqr.h"
 #include "analysis/model_library.h"
 #include "analysis/pole_zero.h"
 #include "analysis/system_connect.h"
@@ -37,7 +39,11 @@ inline ImU32 system_colors_u32[NUM_SYSTEMS] = {
     IM_COL32(249, 115, 22, 255),
 };
 
-enum class ControllerType { None, PID, LeadLag, StateSpace, GainMatrix };
+// LQR is appended, never inserted.  The combo-box label array in the model
+// panel is index-coupled to this enum, and #16 proposed inserting the new
+// member in the middle — which would silently shift every label after it.
+// Appending shifts nothing; the combo now sizes itself from the array.
+enum class ControllerType { None, PID, LeadLag, StateSpace, GainMatrix, LQR };
 enum class InputType { Step, Impulse, Ramp };
 
 // Flat 4-way; two entries are conditionally valid.  PlantLocus is the old
@@ -53,6 +59,17 @@ struct AppState {
     ControllerType ctrl_type = ControllerType::None;
     LinearSystem ctrl_ss;
     Eigen::MatrixXd ctrl_K;
+
+    // --- LQR design weights ---
+    // Diagonals only.  A full Q and R would be 49 + 9 editable cells on the
+    // cascade plant, and the off-diagonal terms have no physical reading for
+    // a user picking a tuning: the diagonal says "how much do I care about
+    // this state" and "how expensive is this leg", which is the whole
+    // vocabulary the design surface needs.  Resized by the recompute guard
+    // whenever the plant's dimensions change.
+    Eigen::VectorXd lqr_q;
+    Eigen::VectorXd lqr_r;
+    LqrResult lqr_result;
 
     // --- Derived systems ---
     LinearSystem systems[NUM_SYSTEMS];

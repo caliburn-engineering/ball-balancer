@@ -1,6 +1,6 @@
 // src/analysis/time_response.cpp
 #include "time_response.h"
-#include "../rk4.h"
+#include "rk4.h"
 
 namespace caliburn {
 

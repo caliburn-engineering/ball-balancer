@@ -1,0 +1,1034 @@
+// tests/test_auto_balance.cpp
+//
+// Closing the loop is the one place where the two halves of this application
+// have to agree numerically rather than merely coexist.  The gain comes from a
+// LINEAR model; it drives the NONLINEAR simulator — a Newton-solved mechanism
+// and a rolling ball, neither of which the design ever saw.
+//
+// So the tests come in two layers.  The first pins the wiring: which state
+// goes in which slot, what the setpoint means, where the servo travel clips.
+// The second runs the real thing and asserts what the ticket actually asks
+// for — that the ball balances under a sensible tuning and visibly does not
+// under a poor one.  A criterion phrased as "visibly" is still a measurable
+// claim, and measuring it here is what keeps it from being re-judged by eye
+// every time the model moves.
+#include "auto_balance.h"
+
+#include "ball_contact.h"
+#include "ball_sim.h"
+#include "cascade_fixture.h"
+#include "sim_step.h"
+#include "table_kinematics.h"
+#include "test_helpers.h"
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
+#include <string>
+
+using namespace caliburn;
+
+namespace {
+
+constexpr double kDeg = M_PI / 180.0;
+constexpr double kHome = 45.0 * kDeg;
+constexpr double kBallRadius = kFixtureBallRadius;
+constexpr double kBallFriction = kFixtureBallFriction;
+
+AutoBalanceDesign designWith(const Eigen::MatrixXd& K) {
+    AutoBalanceDesign d;
+    d.K = K;
+    d.home_leg_rad = kHome;
+    d.servo_tau = 0.05;
+    return d;
+}
+
+// ---------------------------------------------------------------------------
+// Layer 1: the wiring
+// ---------------------------------------------------------------------------
+
+void test_state_vector_layout() {
+    const std::array<double, 3> alpha = {kHome + 0.1, kHome - 0.2, kHome};
+    const Eigen::Vector4d ball(0.03, -0.04, 0.5, -0.6);
+
+    const Eigen::VectorXd x = cascadeState(alpha, kHome, ball);
+
+    ASSERT_EQ((int)x.size(), 7);
+    ASSERT_NEAR(x(0), 0.1, 1e-12);
+    ASSERT_NEAR(x(1), -0.2, 1e-12);
+    ASSERT_NEAR(x(2), 0.0, 1e-12);
+    ASSERT_NEAR(x(3), 0.03, 1e-12);   // ball x
+    ASSERT_NEAR(x(4), -0.04, 1e-12);  // ball y
+    ASSERT_NEAR(x(5), 0.5, 1e-12);    // ball x'
+    ASSERT_NEAR(x(6), -0.6, 1e-12);   // ball y'
+}
+
+// The deviation is from the DESIGN's home angle, not from any fixed 45 degrees.
+// Get this wrong and the loop still converges — to a tilted plate.
+void test_state_deviation_follows_the_design_home() {
+    const std::array<double, 3> alpha = {60.0 * kDeg, 60.0 * kDeg, 60.0 * kDeg};
+    const Eigen::VectorXd x = cascadeState(alpha, 60.0 * kDeg, Eigen::Vector4d::Zero());
+    for (int i = 0; i < 3; ++i) ASSERT_NEAR(x(i), 0.0, 1e-12);
+}
+
+void test_shape_gate() {
+    AutoBalanceDesign d = designWith(Eigen::MatrixXd::Zero(3, 7));
+    ASSERT_TRUE(gainFitsCascade(d));
+    d.K = Eigen::MatrixXd::Zero(1, 4);
+    ASSERT_TRUE(!gainFitsCascade(d));
+    d.K = Eigen::MatrixXd();
+    ASSERT_TRUE(!gainFitsCascade(d));
+}
+
+// A ball at rest at the setpoint, legs at home: nothing to do.  This is the
+// claim that makes a position setpoint need no feedforward.
+// The model panel carries geometry as `float` sliders; the plate holds
+// `double` literals.  0.300f widened is 0.3000000119, so a comparison tight
+// enough to be called exact refuses two mechanisms that are the same object —
+// and the balance loop then never becomes available at all.
+void test_plant_identity_survives_the_float_round_trip() {
+    TableParams plate;
+    plate.R_ground = 0.300;
+    plate.R_table = 0.300;
+    plate.L1 = 0.150;
+    plate.L2 = 0.150;
+
+    // Exactly how the model panel's float sliders reach `cascadeMechanism`.
+    const auto models = getBuiltinModels();
+    const TableParams from_sliders = cascadeMechanism(cascadeModel(models).params);
+    ASSERT_TRUE(samePlant(plate, 9.81, from_sliders, 9.81));
+
+    // A millimetre of leg, however, is a different plate.
+    TableParams longer = from_sliders;
+    longer.L1 = 0.151;
+    ASSERT_TRUE(!samePlant(plate, 9.81, longer, 9.81));
+
+    // And so is the same plate on the moon — the gain would be solved for an
+    // acceleration the simulated ball never feels.
+    ASSERT_TRUE(!samePlant(plate, 9.81, from_sliders, 1.62));
+
+    // A design nobody filled in is all zeros, and matches nothing.
+    ASSERT_TRUE(!samePlant(plate, 9.81, TableParams{}, 0.0));
+}
+
+void test_zero_error_commands_the_home_pose() {
+    Eigen::MatrixXd K = Eigen::MatrixXd::Random(3, 7) * 10.0;
+    const AutoBalanceDesign d = designWith(K);
+
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+    const Eigen::Vector4d ball(0.07, -0.02, 0.0, 0.0);
+
+    const LegCommand c = legCommand(cascadeKinematics(), d, alpha, ball, {{0.07, -0.02}});
+    for (int i = 0; i < 3; ++i) ASSERT_NEAR(c.alpha_rad[i], kHome, 1e-12);
+    ASSERT_TRUE(!c.saturated);
+}
+
+void test_command_is_home_minus_k_error() {
+    Eigen::MatrixXd K = Eigen::MatrixXd::Zero(3, 7);
+    K(0, 3) = 2.0;   // leg 0 reacts to ball x
+    K(1, 4) = -3.0;  // leg 1 reacts to ball y
+    K(2, 0) = 0.5;   // leg 2 reacts to its own neighbour's deviation
+    const AutoBalanceDesign d = designWith(K);
+
+    const std::array<double, 3> alpha = {kHome + 0.04, kHome, kHome};
+    const Eigen::Vector4d ball(0.01, 0.02, 0.0, 0.0);
+
+    const LegCommand c = legCommand(cascadeKinematics(), d, alpha, ball, {});
+    ASSERT_NEAR(c.alpha_rad[0], kHome - 2.0 * 0.01, 1e-12);
+    ASSERT_NEAR(c.alpha_rad[1], kHome + 3.0 * 0.02, 1e-12);
+    ASSERT_NEAR(c.alpha_rad[2], kHome - 0.5 * 0.04, 1e-12);
+    ASSERT_TRUE(!c.saturated);
+}
+
+// The setpoint enters as a reference STATE, so displacing both the ball and the
+// setpoint together is a no-op while displacing only one is not.
+void test_setpoint_moves_the_target() {
+    Eigen::MatrixXd K = Eigen::MatrixXd::Zero(3, 7);
+    K(0, 3) = 1.0;
+    const AutoBalanceDesign d = designWith(K);
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+
+    const LegCommand at = legCommand(cascadeKinematics(), d, alpha,
+                                     Eigen::Vector4d(0.05, 0, 0, 0), {{0.05, 0.0}});
+    ASSERT_NEAR(at.alpha_rad[0], kHome, 1e-12);
+
+    const LegCommand off = legCommand(cascadeKinematics(), d, alpha,
+                                      Eigen::Vector4d(0.05, 0, 0, 0), {});
+    ASSERT_NEAR(off.alpha_rad[0], kHome - 0.05, 1e-12);
+}
+
+// The reference VELOCITY, which is the other half of the reference state and
+// the whole of the trajectory feedforward.  It enters exactly as the position
+// does — as a term of `x_ref`, differenced against the measurement — so a ball
+// moving at the speed the setpoint is moving at is a ball with no error to
+// answer, and the plate stays level.
+//
+// It lives here, in the loop, rather than in whoever is driving the setpoint.
+// It used to be applied by biasing the measurement handed in, two files away
+// in `plate_view`, with a third copy in `test_trajectory`; the arithmetic was
+// identical and the arrangement was not, because the loop's own header went on
+// saying it needed no feedforward.  See #24.
+void test_the_reference_velocity_enters_as_a_velocity_error() {
+    Eigen::MatrixXd K = Eigen::MatrixXd::Zero(3, 7);
+    K(0, 5) = 4.0;   // leg 0 reacts to the ball's x velocity
+    K(1, 6) = -2.0;  // leg 1 to its y velocity
+    const AutoBalanceDesign d = designWith(K);
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+
+    // Ball running at the setpoint's own speed: no error, level plate.
+    BallReference ref;
+    ref.velocity = Eigen::Vector2d(0.08, -0.03);
+    const LegCommand with = legCommand(cascadeKinematics(), d, alpha,
+                                       Eigen::Vector4d(0, 0, 0.08, -0.03), ref);
+    for (int i = 0; i < 3; ++i) ASSERT_NEAR(with.alpha_rad[i], kHome, 1e-12);
+
+    // The same ball with a HELD setpoint is a ball the loop tries to stop.
+    const LegCommand without = legCommand(cascadeKinematics(), d, alpha,
+                                          Eigen::Vector4d(0, 0, 0.08, -0.03), {});
+    ASSERT_NEAR(without.alpha_rad[0], kHome - 4.0 * 0.08, 1e-12);
+    ASSERT_NEAR(without.alpha_rad[1], kHome + 2.0 * -0.03, 1e-12);
+}
+
+// What the tuning panel says about the feedforward, as arithmetic.
+//
+// The feedforward has no gain of its own: the reference velocity is multiplied
+// by K's velocity columns, and LQR designs those from the `x' ball` and
+// `y' ball` weights.  So those two sliders DO set how hard the loop chases a
+// moving setpoint, and the panel says so — which is a claim, and this is the
+// test under it.  Inventing a separate feedforward gain would be a second
+// opinion about a number K already owns.
+void test_the_ball_velocity_weights_set_the_feedforwards_strength() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+
+    Eigen::VectorXd q = defaultLqrStateWeights(7);
+    const Eigen::VectorXd r = defaultLqrInputWeights(3);
+    const Eigen::MatrixXd soft = gainFor(e, q, r);
+
+    q(5) = q(6) = 10.0 * q(5);          // the two sliders the panel names
+    const Eigen::MatrixXd hard = gainFor(e, q, r);
+
+    // Only the velocity columns are what the feedforward is multiplied by.
+    ASSERT_TRUE(hard.col(5).norm() > 2.0 * soft.col(5).norm());
+    ASSERT_TRUE(hard.col(6).norm() > 2.0 * soft.col(6).norm());
+
+    // And so the same moving setpoint asks the legs for more.
+    BallReference ref;
+    ref.velocity = Eigen::Vector2d(0.075, 0.0);   // the opening circle's speed
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+    const Eigen::Vector4d still(0, 0, 0, 0);      // a ball not yet keeping up
+
+    AutoBalanceDesign ds = designWith(soft), dh = designWith(hard);
+    const LegCommand cs = legCommand(cascadeKinematics(), ds, alpha, still, ref);
+    const LegCommand ch = legCommand(cascadeKinematics(), dh, alpha, still, ref);
+
+    double span_s = 0.0, span_h = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        span_s = std::max(span_s, std::abs(cs.alpha_rad[i] - kHome));
+        span_h = std::max(span_h, std::abs(ch.alpha_rad[i] - kHome));
+    }
+    ASSERT_TRUE(span_h > span_s);
+}
+
+// Travel limits clamp; the workspace then clips.  Two stages, because they
+// are two different constraints: a leg has a stop, and a triple of legs has to
+// describe a plate that exists.  Since #22 the second one is enforced too, so
+// a command driven at both stops does not come back sitting on them.
+void test_command_clamps_to_servo_travel_then_to_the_workspace() {
+    Eigen::MatrixXd K = Eigen::MatrixXd::Zero(3, 7);
+    K(0, 3) = 1e4;
+    K(1, 3) = -1e4;
+    const AutoBalanceDesign d = designWith(K);
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+
+    const LegCommand c = legCommand(cascadeKinematics(), d, alpha,
+                                    Eigen::Vector4d(0.05, 0, 0, 0), {});
+    ASSERT_TRUE(c.saturated);
+    ASSERT_TRUE(c.clipped_to_holdable);
+
+    // Both stops asked for a 70 degree spread, which no assembly of this
+    // mechanism has.  What comes back is inside the travel rather than on it.
+    ASSERT_TRUE(c.alpha_rad[0] > d.alpha_min_rad);
+    ASSERT_TRUE(c.alpha_rad[1] < d.alpha_max_rad);
+
+    // Direction survives: leg 0 still driven down, leg 1 up, leg 2 untouched.
+    ASSERT_TRUE(c.alpha_rad[0] < kHome);
+    ASSERT_TRUE(c.alpha_rad[1] > kHome);
+    ASSERT_NEAR(c.alpha_rad[2], kHome, 1e-12);
+
+    // And the plate can be built at what it asked for.
+    const TableKinematics& tk = cascadeKinematics();
+    const double mean = (c.alpha_rad[0] + c.alpha_rad[1] + c.alpha_rad[2]) / 3.0;
+    ASSERT_TRUE(tk.solve_pose(c.alpha_rad, tk.home_pose(mean)).converged);
+}
+
+// The clamp on its own, where the clamped triple IS assemblable: the limit is
+// still a hard stop, and nothing gets scaled back for no reason.
+//
+// The travel has to be narrowed for this case to exist at all, which is worth
+// knowing on its own.  The shipped limits are 10 and 80 degrees, and a SINGLE
+// leg taken to either of them with the other two at home already has no
+// assembly — the mechanism's real range about the home pose is far narrower
+// than its servos'.  That is why the workspace clip is doing work on almost
+// every saturated frame rather than in a rare corner.
+void test_a_reachable_clamp_is_left_on_the_stop() {
+    Eigen::MatrixXd K = Eigen::MatrixXd::Zero(3, 7);
+    K(0, 3) = 1e4;                       // one leg only, driven to its stop
+    AutoBalanceDesign d = designWith(K);
+    d.alpha_min_rad = 40.0 * kDeg;
+    d.alpha_max_rad = 50.0 * kDeg;
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+
+    const LegCommand c = legCommand(cascadeKinematics(), d, alpha,
+                                    Eigen::Vector4d(0.05, 0, 0, 0), {});
+    ASSERT_TRUE(c.saturated);
+    ASSERT_TRUE(!c.clipped_to_holdable);
+    ASSERT_NEAR(c.alpha_rad[0], d.alpha_min_rad, 1e-12);
+    ASSERT_NEAR(c.alpha_rad[1], kHome, 1e-12);
+    ASSERT_NEAR(c.alpha_rad[2], kHome, 1e-12);
+}
+
+void test_wrong_shape_commands_the_home_pose() {
+    const AutoBalanceDesign d = designWith(Eigen::MatrixXd::Ones(2, 3));
+    const std::array<double, 3> alpha = {kHome + 0.2, kHome, kHome};
+    const LegCommand c = legCommand(cascadeKinematics(), d, alpha,
+                                    Eigen::Vector4d(0.1, 0.1, 1, 1), {});
+    for (int i = 0; i < 3; ++i) ASSERT_NEAR(c.alpha_rad[i], kHome, 1e-12);
+    ASSERT_TRUE(!c.saturated);
+}
+
+// The lag, tested where the lag is what the servo is doing.  The command is
+// 0.2 rad from where the legs are, against a handover at `rate * tau` = 0.524,
+// so the rate limit never binds and this is the pure exponential it always was
+// — which is the point: the limit must be invisible in the regime the loop
+// spends its life in.  The command used to be 1.0 rad, which is twice the
+// handover and so no longer a test of the lag at all.
+void test_servo_lag_is_first_order() {
+    const double tau = 0.05;
+    const double rate = kServoRateMax;
+    const std::array<double, 3> cmd = {0.2, 0.2, 0.2};
+    std::array<double, 3> a = {0.0, 0.0, 0.0};
+
+    // One time constant, reached in one step and in many: the exact form makes
+    // the answer independent of how the interval was subdivided.
+    const std::array<double, 3> one_shot = stepServos(a, cmd, tau, tau, rate);
+    ASSERT_NEAR(one_shot[0], 0.2 * (1.0 - std::exp(-1.0)), 1e-12);
+
+    for (int k = 0; k < 100; ++k) a = stepServos(a, cmd, tau, tau / 100.0, rate);
+    ASSERT_NEAR(a[0], 0.2 * (1.0 - std::exp(-1.0)), 1e-9);
+
+    // No step, no motion — and no division by a zero tau.
+    const std::array<double, 3> still = stepServos(a, cmd, tau, 0.0, rate);
+    ASSERT_NEAR(still[0], a[0], 1e-15);
+    const std::array<double, 3> degenerate =
+        stepServos(a, cmd, 0.0, 1.0 / 60.0, rate);
+    ASSERT_TRUE(std::isfinite(degenerate[0]));
+
+    // Each leg keeps its own command.
+    const std::array<double, 3> mixed =
+        stepServos({0.0, 0.0, 0.0}, {0.2, -0.2, 0.0}, tau, tau, rate);
+    ASSERT_TRUE(mixed[0] > 0.0 && mixed[1] < 0.0);
+    ASSERT_NEAR(mixed[2], 0.0, 1e-15);
+
+    // And an absent limit is the unlimited servo, bit for bit, at an error far
+    // past where the limit would have bound.  This is what says the piecewise
+    // form did not quietly change the lag.
+    for (double r : {0.0, -1.0, std::numeric_limits<double>::infinity()}) {
+        const std::array<double, 3> free_run =
+            stepServos({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}, tau, tau, r);
+        ASSERT_NEAR(free_run[0], 1.0 - std::exp(-1.0), 1e-15);
+    }
+}
+
+// The rate limit itself: what it is, when it engages, and that it cannot make
+// the integration oscillate.
+//
+// The handover is at `|cmd - alpha| = rate * tau`, which against the shipped
+// 10.47 rad/s and 0.05 s lag is 30 degrees of leg error — deliberately large.
+// See `kServoRateMax`: this is insurance for a saturated kick recovery, not the
+// fix for a corner, which is #31's.
+void test_the_servo_cannot_be_driven_faster_than_its_rate_limit() {
+    const double tau = 0.05;
+    const double rate = kServoRateMax;
+    const double dt = 1.0 / 60.0;
+
+    // 30 degrees exactly, which is where the two branches meet.
+    ASSERT_NEAR(rate * tau, 30.0 * kDeg, 1e-12);
+
+    // A full-travel command jump: 70 degrees, far past the handover.  The leg
+    // moves `rate * dt` and not a radian more, whichever way it was sent.
+    const std::array<double, 3> far = {kHome + 70.0 * kDeg, kHome - 70.0 * kDeg,
+                                       kHome};
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+    const std::array<double, 3> one = stepServos(alpha, far, tau, dt, rate);
+    ASSERT_NEAR(one[0] - kHome, rate * dt, 1e-15);
+    ASSERT_NEAR(one[1] - kHome, -rate * dt, 1e-15);
+    ASSERT_NEAR(one[2], kHome, 1e-15);
+
+    // Unlimited, the same frame would have moved 1.98 times as far — an
+    // average rate of 20.8 rad/s, twice what the servo can do.  So this is a
+    // limit that actually bit rather than a no-op dressed as one.
+    const std::array<double, 3> free_run =
+        stepServos(alpha, far, tau, dt, std::numeric_limits<double>::infinity());
+    ASSERT_NEAR((free_run[0] - kHome) / (rate * dt), 1.984, 1e-3);
+
+    // No dt can overshoot the command, at any subdivision, from either side.
+    // A forward-Euler rate limiter would sail past `cmd` for a large enough dt
+    // and then oscillate; this cannot, because the ramp stops at the handover
+    // and the exact decay finishes the step.
+    for (double step : {1e-4, 1.0 / 240.0, dt, 0.05, 0.2, 1.0, 10.0}) {
+        const std::array<double, 3> n = stepServos(alpha, far, tau, step, rate);
+        ASSERT_TRUE(n[0] >= kHome && n[0] <= far[0]);
+        ASSERT_TRUE(n[1] <= kHome && n[1] >= far[1]);
+    }
+
+    // And subdividing gives the same answer as one shot, which is what
+    // "closed form" is worth: the handover is resolved analytically rather
+    // than landed on by luck of the frame boundary.
+    std::array<double, 3> walked = alpha;
+    for (int k = 0; k < 2000; ++k)
+        walked = stepServos(walked, far, tau, 0.2 / 2000.0, rate);
+    const std::array<double, 3> at_once = stepServos(alpha, far, tau, 0.2, rate);
+    ASSERT_NEAR(walked[0], at_once[0], 1e-9);
+    ASSERT_NEAR(walked[1], at_once[1], 1e-9);
+
+    // A lagless servo under a rate limit is a pure ramp that stops on the
+    // command rather than overshooting it.
+    const std::array<double, 3> ramped = stepServos(alpha, far, 0.0, dt, rate);
+    ASSERT_NEAR(ramped[0] - kHome, rate * dt, 1e-15);
+    const std::array<double, 3> arrived = stepServos(alpha, far, 0.0, 1.0, rate);
+    ASSERT_NEAR(arrived[0], far[0], 1e-15);
+
+    // **And a NEGATIVE tau is lagless too, which the first cut of this got
+    // wrong.**  `handover = rate * tau` goes negative, no error is below it, so
+    // every leg took the ramp — and took it for longer than it takes to reach
+    // the command.  A 0.1 rad step at tau = -0.05 landed on 0.1745, 75 per cent
+    // past `cmd`, in a function whose header promises it cannot overshoot at
+    // any dt.  Reachable only from a caller, since `cascadeServoTau` clamps at
+    // 1e-3 — but `stepServosOnPlate` takes tau from one.
+    for (double bad_tau : {0.0, -0.05, -10.0}) {
+        const std::array<double, 3> small =
+            stepServos({0.0, 0.0, 0.0}, {0.1, -0.1, 0.0}, bad_tau, dt, rate);
+        ASSERT_TRUE(small[0] >= 0.0 && small[0] <= 0.1);
+        ASSERT_TRUE(small[1] <= 0.0 && small[1] >= -0.1);
+        // Given long enough it arrives exactly, rather than sailing past.
+        const std::array<double, 3> done =
+            stepServos({0.0, 0.0, 0.0}, {0.1, -0.1, 0.0}, bad_tau, 1.0, rate);
+        ASSERT_NEAR(done[0], 0.1, 1e-15);
+        ASSERT_NEAR(done[1], -0.1, 1e-15);
+    }
+}
+
+// **The property the rate limit exists for.**
+//
+// While the ramp is in charge `alpha_dot` is the constant `rate`, so
+// `alpha_ddot` is exactly zero — and `alpha_ddot` is what drives the `c_ddot`
+// and `omega_dot` terms that decide whether the ball separates.  The plate's
+// heave acceleration vanishes precisely when the loop is slamming hardest.
+//
+// Asserted as an exact zero rather than a small number, because it is one: the
+// second difference of a constant-rate ramp is zero in floating point too.
+void test_a_rate_saturated_leg_has_no_acceleration() {
+    const double tau = 0.05;
+    const double rate = kServoRateMax;
+    const double dt = 1.0 / 60.0;
+    const std::array<double, 3> far = {kHome + 70.0 * kDeg, kHome, kHome};
+
+    // Three frames of ramp, and the second difference of the leg angle is
+    // exactly zero — the integrated form of `alpha_ddot = 0`.
+    std::array<double, 3> a0 = {kHome, kHome, kHome};
+    const std::array<double, 3> a1 = stepServos(a0, far, tau, dt, rate);
+    const std::array<double, 3> a2 = stepServos(a1, far, tau, dt, rate);
+    const std::array<double, 3> a3 = stepServos(a2, far, tau, dt, rate);
+    ASSERT_EQ((a2[0] - a1[0]) - (a1[0] - a0[0]), 0.0);
+    ASSERT_EQ((a3[0] - a2[0]) - (a2[0] - a1[0]), 0.0);
+
+    // And the analytic rate the plate is handed agrees with that: saturated at
+    // the limit, with a second derivative of exactly zero.
+    const std::array<double, 3> rate_1 = servoRate(a1, far, tau, rate);
+    ASSERT_NEAR(rate_1[0], rate, 1e-15);
+    ASSERT_EQ(servoAccel(rate_1, tau, rate)[0], 0.0);
+    // The legs that were not asked to move are untouched by any of it.
+    ASSERT_EQ(rate_1[1], 0.0);
+    ASSERT_EQ(servoAccel(rate_1, tau, rate)[1], 0.0);
+
+    // At the handover the acceleration comes back, at the magnitude an
+    // unlimited servo would have had all along — later, and from a smaller
+    // error.  Strictly better, never worse.
+    const std::array<double, 3> at_handover = {far[0] - rate * tau, kHome, kHome};
+    const std::array<double, 3> rate_h = servoRate(at_handover, far, tau, rate);
+    ASSERT_NEAR(rate_h[0], rate, 1e-12);
+    const std::array<double, 3> just_inside = {far[0] - 0.999 * rate * tau,
+                                               kHome, kHome};
+    const std::array<double, 3> rate_i = servoRate(just_inside, far, tau, rate);
+    ASSERT_NEAR(servoAccel(rate_i, tau, rate)[0], -rate_i[0] / tau, 1e-12);
+    ASSERT_TRUE(std::abs(servoAccel(rate_i, tau, rate)[0]) > 200.0);
+}
+
+// ---------------------------------------------------------------------------
+// The no-pumping constraint
+// ---------------------------------------------------------------------------
+//
+// `holdContactDown` is one scalar's worth of control law and the whole of the
+// bounce's stability argument: `u_rebound = e u + p (1 + e)`, so a contact
+// point that never rises can never hand a bouncing ball back more than it
+// arrived with.  These pin it against plates built by hand, where the answer is
+// known; `test_attract_mode` pins that it survives the closed loop.
+
+/// A plate at home with its legs being driven at a chosen rate, assembled the
+/// way `stepSim` assembles one.
+PlateMotion movingPlate(const TableKinematics& tk, const TablePose& pose,
+                        const std::array<double, 3>& alpha,
+                        const std::array<double, 3>& cmd, double tau) {
+    const std::array<double, 3> rate =
+        servoRate(alpha, cmd, tau, tk.params().alpha_rate_max);
+    return plateMotion(tk, pose, alpha, rate, servoAccel(rate, tau,
+                                                         tk.params().alpha_rate_max));
+}
+
+/// How fast a command has the contact point under `s` rising, in m/s.
+double riseUnder(const TableKinematics& tk, const TablePose& pose,
+                 const std::array<double, 3>& alpha,
+                 const std::array<double, 3>& cmd, double tau,
+                 const Eigen::Vector3d& s) {
+    return contactNormalRate(movingPlate(tk, pose, alpha, cmd, tau), s);
+}
+
+// A command that would lift the plate into the ball is lowered until it does
+// not, and a command that is already dropping away is handed straight back.
+void test_the_constraint_binds_only_on_a_rising_contact_point() {
+    const TableParams tp = cascadeMechanism(cascadeModel(getBuiltinModels()).params);
+    const TableKinematics tk(tp);
+    const TablePose pose = tk.home_pose(kHome);
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+    const Eigen::Vector3d s(0.05, 0.0, kBallRadius);
+
+    AutoBalanceDesign d;
+    d.home_leg_rad = kHome;
+    d.servo_tau = 0.05;
+    d.mechanism = tp;
+
+    // All three legs commanded up: pure heave, and the contact point goes with
+    // it.  `plate` is the plate as it stands, which is what `stepSim` hands in.
+    const PlateMotion still = movingPlate(tk, pose, alpha, alpha, d.servo_tau);
+    const std::array<double, 3> up = {kHome + 0.05, kHome + 0.05, kHome + 0.05};
+    ASSERT_TRUE(riseUnder(tk, pose, alpha, up, d.servo_tau, s) > 0.05);
+
+    const std::array<double, 3> held =
+        holdContactDown(tk, d, still, alpha, up, s);
+    ASSERT_TRUE(riseUnder(tk, pose, alpha, held, d.servo_tau, s) <= 0.0);
+    // It gave up the rise and not the whole command: the legs are still being
+    // asked for something, just not for a lift.
+    ASSERT_TRUE(held[0] < up[0]);
+
+    // And a command that already drops the plate is untouched, bit for bit.
+    const std::array<double, 3> down = {kHome - 0.05, kHome - 0.05, kHome - 0.05};
+    const std::array<double, 3> kept =
+        holdContactDown(tk, d, still, alpha, down, s);
+    for (int i = 0; i < 3; ++i) ASSERT_EQ(kept[i], down[i]);
+}
+
+// **Tilt authority is untouched, and exactly so.**  The correction is the leg
+// rate `J_v` maps to pure heave, so `phi_dot` and `theta_dot` — and `omega`
+// with them — come out unchanged.  A uniform `(1, 1, 1)` nudge would have been
+// the obvious reading of "common-mode" and is not the same thing: away from the
+// symmetric pose it tilts the plate as it lifts it.
+void test_the_constraint_leaves_the_tilt_rates_alone() {
+    const TableParams tp = cascadeMechanism(cascadeModel(getBuiltinModels()).params);
+    const TableKinematics tk(tp);
+    const std::array<double, 3> alpha = {kHome + 0.02, kHome - 0.03, kHome + 0.01};
+    const FKResult fk = tk.solve_pose(alpha, tk.home_pose(kHome));
+    ASSERT_TRUE(fk.converged);
+
+    AutoBalanceDesign d;
+    d.home_leg_rad = kHome;
+    d.servo_tau = 0.05;
+    d.mechanism = tp;
+
+    // A command that tilts AND lifts, from an off-centre pose, so that the two
+    // are genuinely mixed in the leg triple.
+    const std::array<double, 3> cmd = {kHome + 0.14, kHome + 0.02, kHome + 0.07};
+    const PlateMotion before = movingPlate(tk, fk.pose, alpha, cmd, d.servo_tau);
+    const Eigen::Vector3d s(0.04, -0.06, kBallRadius);
+    ASSERT_TRUE(contactNormalRate(before, s) > 0.0);
+
+    const std::array<double, 3> held =
+        holdContactDown(tk, d, before, alpha, cmd, s);
+    const PlateMotion after = movingPlate(tk, fk.pose, alpha, held, d.servo_tau);
+
+    // The angular velocity is the same vector, to the precision an LU solve
+    // leaves.  The heave is not.
+    for (int i = 0; i < 3; ++i)
+        ASSERT_NEAR(after.omega(i), before.omega(i), 1e-9);
+    ASSERT_TRUE(after.c_dot(2) < before.c_dot(2) - 0.01);
+    ASSERT_TRUE(contactNormalRate(after, s) <= 1e-9);
+}
+
+// The same flag the contact model refuses a separation on refuses this.  Near a
+// singularity `J_v` is arithmetic rather than physics, and inverting it would be
+// commanding a leg rate to cancel a plate motion nobody can vouch for.
+void test_untrusted_rates_leave_the_command_alone() {
+    const TableParams tp = cascadeMechanism(cascadeModel(getBuiltinModels()).params);
+    const TableKinematics tk(tp);
+    const TablePose pose = tk.home_pose(kHome);
+    const std::array<double, 3> alpha = {kHome, kHome, kHome};
+    const Eigen::Vector3d s(0.05, 0.0, kBallRadius);
+
+    AutoBalanceDesign d;
+    d.home_leg_rad = kHome;
+    d.servo_tau = 0.05;
+    d.mechanism = tp;
+
+    PlateMotion m = movingPlate(tk, pose, alpha, alpha, d.servo_tau);
+    const std::array<double, 3> up = {kHome + 0.05, kHome + 0.05, kHome + 0.05};
+
+    m.rates_trustworthy = true;
+    ASSERT_TRUE(holdContactDown(tk, d, m, alpha, up, s)[0] < up[0]);
+
+    m.rates_trustworthy = false;
+    const std::array<double, 3> kept = holdContactDown(tk, d, m, alpha, up, s);
+    for (int i = 0; i < 3; ++i) ASSERT_EQ(kept[i], up[i]);
+
+    // And a servo with no lag has no map from a command to a rate to correct.
+    m.rates_trustworthy = true;
+    AutoBalanceDesign lagless = d;
+    lagless.servo_tau = 0.0;
+    const std::array<double, 3> unchanged =
+        holdContactDown(tk, lagless, m, alpha, up, s);
+    for (int i = 0; i < 3; ++i) ASSERT_EQ(unchanged[i], up[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Layer 2: the loop, closed around the nonlinear plate
+// ---------------------------------------------------------------------------
+
+struct SimResult {
+    double final_radius;   // [m] distance of the ball from its setpoint
+    double peak_radius;    // [m]
+    double settle_time;    // [s] after which it never again left 5 mm; -1 = never
+    double final_tilt_deg; // [deg] the larger of |roll| and |pitch| at the end
+    bool saturated;        // a leg command hit a travel limit at least once
+    bool clipped;          // ...or asked for a pose the mechanism cannot make
+    bool left_plate;
+};
+
+// `stepSim`, which is the step `PlateView::step` drives — not a second copy of
+// it in the same order.  This harness used to carry its own, and the eight
+// calls it spelt out were free to drift away from the application's; they had
+// (see `sim_step.h`).  Nothing here is linearised, and nothing here knows what
+// Q and R were.
+SimResult runClosedLoop(const ModelEntry& e,
+                        const Eigen::MatrixXd& K,
+                        const Eigen::Vector4d& ball0,
+                        double x_sp,
+                        double y_sp,
+                        double duration) {
+    const SimPlate plate = cascadePlate(e.params);
+
+    SimInput in;
+    in.design = cascadeDesign(e.params);
+    in.design.K = K;
+    in.held_setpoint = Eigen::Vector2d(x_sp, y_sp);   // a Fixed path: held
+
+    SimState s = simStart(plate, in.design.home_leg_rad, ball0);
+
+    const double dt = in.dt;
+    const int steps = static_cast<int>(duration / dt);
+
+    SimResult r{0.0, 0.0, -1.0, 0.0, false, false, false};
+    for (int k = 0; k < steps; ++k) {
+        const SimReport frame = stepSim(plate, in, s);
+        if (frame.saturated) r.saturated = true;
+        if (frame.clipped) r.clipped = true;
+
+        const double radius = std::hypot(frame.ball_plate(0) - x_sp,
+                                         frame.ball_plate(1) - y_sp);
+        r.peak_radius = std::max(r.peak_radius, radius);
+        if (radius > 0.005) r.settle_time = (k + 1) * dt;
+        if (frame.left_plate) {
+            r.left_plate = true;
+            r.final_radius = radius;
+            return r;
+        }
+        if (k + 1 == steps) r.final_radius = radius;
+    }
+    r.final_tilt_deg =
+        std::max(std::abs(s.pose.phi), std::abs(s.pose.theta)) / kDeg;
+    if (r.settle_time >= duration - dt) r.settle_time = -1.0;
+    return r;
+}
+
+// 60 mm out along x and 40 mm back along y, at rest: a quarter of the plate's
+// radius, plainly visible in the 3D view and well outside anything a
+// linearisation could excuse.
+//
+// The application used to OPEN on this displacement, which is why it was the
+// one measured here.  It no longer does — that step input was the opening
+// slam, and the demo now starts the ball already tracing a circle (see
+// `attract_mode.h`).  The displacement stays as the yardstick anyway: "recover
+// from a quarter of the plate, at rest" is the question this file exists to
+// ask of a gain, and it is a harder one than the opening now poses.
+const Eigen::Vector4d kDisplaced(0.06, -0.04, 0.0, 0.0);
+
+// The weights the application opens on.  If THIS does not balance the ball,
+// nobody who switches the controller to LQR ever sees the product work.
+void test_default_weights_balance_the_ball() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+
+    const SimResult s = runClosedLoop(e, defaultGain(e), kDisplaced, 0.0, 0.0, 20.0);
+
+    ASSERT_TRUE(!s.left_plate);
+    ASSERT_TRUE(s.settle_time > 0.0);
+    ASSERT_TRUE(s.settle_time < 5.0);
+    ASSERT_TRUE(s.final_radius < 0.005);
+}
+
+// The nudge buttons in Plate Control, as a number: an impulse in velocity,
+// rejected.  This is the disturbance the "visibly degrades" criterion is read
+// against, so the good case has to be pinned first.
+void test_default_weights_reject_a_nudge() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+
+    const SimResult s = runClosedLoop(
+        e, defaultGain(e), Eigen::Vector4d(0.0, 0.0, 0.35, 0.25), 0.0, 0.0, 20.0);
+
+    ASSERT_TRUE(!s.left_plate);
+    ASSERT_TRUE(s.peak_radius > 0.05);      // it really was kicked
+    ASSERT_TRUE(s.settle_time > 0.0);
+    ASSERT_TRUE(s.settle_time < 5.0);
+    ASSERT_TRUE(s.final_radius < 0.005);
+}
+
+// A ball at rest anywhere on a flat plate is an equilibrium, so a position
+// setpoint is reachable with no feedforward at all.  That claim is arithmetic
+// in `legCommand`; here it is the nonlinear plate that has to agree.
+void test_setpoint_is_tracked() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+
+    const SimResult s = runClosedLoop(
+        e, defaultGain(e), Eigen::Vector4d::Zero(), 0.08, 0.05, 20.0);
+
+    ASSERT_TRUE(!s.left_plate);
+    ASSERT_TRUE(s.settle_time > 0.0);
+    ASSERT_TRUE(s.settle_time < 5.0);
+    ASSERT_TRUE(s.final_radius < 0.005);
+}
+
+// "Moving the poles toward the imaginary axis should visibly make the ball
+// sluggish" — the ticket's own words, as a comparison the user can reproduce
+// by dragging the ball-position weights down.
+void test_looser_weights_are_visibly_sluggish() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+
+    Eigen::VectorXd q_loose(7);
+    q_loose << 1, 1, 1, 50, 50, 5, 5;
+    const Eigen::MatrixXd K_loose = gainFor(e, q_loose, defaultLqrInputWeights(3));
+
+    const SimResult loose = runClosedLoop(e, K_loose, kDisplaced, 0.0, 0.0, 20.0);
+    const SimResult base = runClosedLoop(e, defaultGain(e), kDisplaced, 0.0, 0.0, 20.0);
+
+    ASSERT_TRUE(loose.settle_time > 0.0);
+    ASSERT_TRUE(base.settle_time > 0.0);
+    // Not "a bit slower": four times slower, which is the difference between
+    // watching it arrive and wondering whether it is moving.
+    ASSERT_TRUE(loose.settle_time > 4.0 * base.settle_time);
+}
+
+// The third acceptance criterion, as a number.  Legs priced a thousand times
+// above the ball buys a controller that will barely move them: it stalls the
+// plate inside the friction dead band and the ball simply stays where it was
+// put, or wanders half the plate away when it is kicked.
+//
+// R = 1000 is the top of the model panel's own slider, deliberately.  A test
+// that proved degradation at 1e5 would be proving it about a tuning nobody can
+// reach through the UI, which is not the criterion.  Every number below is
+// against the good case measured in the two tests above: 1.1 mm and 1.8 s from
+// the same displacement, 81 mm of peak and 2.2 s from the same kick.
+void test_poor_tuning_visibly_degrades() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+
+    const Eigen::MatrixXd K_poor = gainFor(
+        e, defaultLqrStateWeights(7), Eigen::VectorXd::Constant(3, 1000.0));
+
+    const SimResult held = runClosedLoop(e, K_poor, kDisplaced, 0.0, 0.0, 20.0);
+    ASSERT_TRUE(held.settle_time < 0.0);    // never settles, in twenty seconds
+    ASSERT_TRUE(held.final_radius > 0.05);  // and never really tried
+    // Stalled inside the dead band rather than converging slowly: the tilt it
+    // is asking for is one the ball cannot be started by.
+    ASSERT_TRUE(held.final_tilt_deg < std::atan(kBallFriction) / kDeg);
+
+    const SimResult kicked = runClosedLoop(
+        e, K_poor, Eigen::Vector4d(0.0, 0.0, 0.35, 0.25), 0.0, 0.0, 20.0);
+    ASSERT_TRUE(kicked.peak_radius > 0.12);   // half the plate, against 81 mm
+    ASSERT_TRUE(kicked.settle_time < 0.0);
+    ASSERT_TRUE(kicked.final_radius > 0.05);
+}
+
+// Why the defaults above are not unit weights, kept as a fact rather than a
+// memory.  The rolling model's Coulomb resistance is a dead band: below
+// atan(c_rr) of tilt the ball cannot be started at all, and a state feedback
+// with no integral term parks inside it.  A future reader will meet this as
+// "the ball stops 37 mm off centre and the plate just sits there tilted", and
+// it is a property of the plant, not a defect in the loop.
+void test_unit_weights_park_in_the_friction_dead_band() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+
+    const Eigen::MatrixXd K_unit =
+        gainFor(e, Eigen::VectorXd::Ones(7), Eigen::VectorXd::Ones(3));
+    const SimResult s = runClosedLoop(e, K_unit, kDisplaced, 0.0, 0.0, 20.0);
+
+    ASSERT_TRUE(!s.left_plate);
+    ASSERT_TRUE(s.settle_time < 0.0);        // stalls, well short of centre
+    ASSERT_TRUE(s.final_radius > 0.02);
+    // Stalled against the tilt that rolling resistance exactly cancels — to
+    // within a tenth of it, because sign(v) leaves the ball creeping rather
+    // than stopping dead.  An order of magnitude below the 8 deg the working
+    // tuning uses, which is the whole difference between the two runs.
+    ASSERT_NEAR(s.final_tilt_deg, std::atan(kBallFriction) / kDeg, 0.06);
+}
+
+// ---------------------------------------------------------------------------
+// Layer 3: the preset tunings (#19)
+// ---------------------------------------------------------------------------
+//
+// Three named tunings exist so that somebody who has never met a state
+// weighting matrix can still watch what controller design does.  That makes
+// every one of them a claim about the ball's behaviour, and the claims are
+// printed on screen next to the buttons — so they are asserted here rather
+// than re-judged by eye whenever the plant moves.
+
+SimResult runPreset(const LqrPreset& p) {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+    return runClosedLoop(e, gainForPreset(e, p), kDisplaced, 0.0, 0.0, 30.0);
+}
+
+/// The Nominal run, computed once: it is the yardstick every other preset is
+/// read against, and three tests want it.  `nominalPreset()` rather than
+/// `defaultGain`, which is the same matrix by the invariant the test below
+/// pins — going through the preset is what makes that a shared claim rather
+/// than a coincidence this file relies on.
+const SimResult& nominalRun() {
+    static const SimResult r = runPreset(nominalPreset());
+    return r;
+}
+
+// "Nominal is the tuning loaded at startup" — arithmetic, not a coincidence
+// two sets of literals have to keep agreeing about.  `defaultLqrStateWeights`
+// is DEFINED as the nominal preset, and this is the test that would notice if
+// somebody inverted that dependency again.
+void test_the_nominal_preset_is_the_startup_tuning() {
+    const Eigen::VectorXd q = presetStateWeights(nominalPreset(), 7);
+    const Eigen::VectorXd r = presetInputWeights(nominalPreset(), 3);
+    ASSERT_TRUE(q.isApprox(defaultLqrStateWeights(7)));
+    ASSERT_TRUE(r.isApprox(defaultLqrInputWeights(3)));
+
+    // And it is the middle button, so a visitor arriving at the panel is
+    // sitting on the preset the demo is already running — sluggish, shipped,
+    // saturating, in that order.  Compared by address: `nominalPreset()` hands
+    // back a reference INTO the table, and asserting that identity is what
+    // stops a fourth preset being inserted above it unnoticed.
+    ASSERT_TRUE(&lqrPresets()[1] == &nominalPreset());
+}
+
+// Only the ball's own weights vary between presets: the leg weights are not
+// what the contrast is about, and a visitor who watched two knobs move could
+// not say which one they had just seen the consequence of.
+void test_the_presets_differ_only_in_the_ball_weights() {
+    for (const auto& p : lqrPresets()) {
+        const Eigen::VectorXd q = presetStateWeights(p, 7);
+        ASSERT_NEAR(q(0), 1.0, 1e-12);
+        ASSERT_NEAR(q(1), 1.0, 1e-12);
+        ASSERT_NEAR(q(2), 1.0, 1e-12);
+        ASSERT_NEAR(q(3), q(4), 1e-12);
+        ASSERT_NEAR(q(5), q(6), 1e-12);
+        ASSERT_NEAR(presetInputWeights(p, 3)(0), 1.0, 1e-12);
+    }
+
+    // A plant that is not the cascade gets unit weights, exactly as the
+    // startup default does — the UI does not offer the presets for one, and
+    // this is what stops a preset meaning something arbitrary if it ever did.
+    ASSERT_TRUE(presetStateWeights(presetNamed("Aggressive"), 4)
+                    .isApprox(Eigen::VectorXd::Ones(4)));
+}
+
+// Which button is lit.  The presets are an offer rather than a mode, so the
+// answer is asked of the weights every frame rather than stored — and the
+// interesting half is that dragging any slider puts it back to "none", which
+// is the UI telling the truth about a tuning that is no longer a preset.
+void test_the_lit_button_follows_the_weights() {
+    const auto& presets = lqrPresets();
+    for (int i = 0; i < static_cast<int>(presets.size()); ++i) {
+        ASSERT_EQ(activePreset(presetStateWeights(presets[i], 7),
+                               presetInputWeights(presets[i], 3)), i);
+    }
+
+    // Startup sits on Nominal, so a visitor arriving at the panel can see
+    // which of the three they are already watching.
+    ASSERT_EQ(activePreset(defaultLqrStateWeights(7), defaultLqrInputWeights(3)), 1);
+
+    // One slider moved is no longer a preset, and neither is a plant that is
+    // not the cascade — off it the three presets are the same unit weights,
+    // and reporting a match would only be reporting that they stopped
+    // differing.
+    Eigen::VectorXd q = defaultLqrStateWeights(7);
+    q(3) *= 1.1;
+    ASSERT_EQ(activePreset(q, defaultLqrInputWeights(3)), -1);
+    ASSERT_EQ(activePreset(defaultLqrStateWeights(7),
+                           Eigen::VectorXd::Constant(3, 5.0)), -1);
+    ASSERT_EQ(activePreset(Eigen::VectorXd::Ones(4), Eigen::VectorXd::Ones(2)), -1);
+}
+
+// The nominal run, as the yardstick the other two are read against.  Also the
+// half of the aggressive claim that cannot be made by the aggressive run
+// alone: "living against the servo stops" is only a contrast if the shipped
+// tuning does not.
+void test_the_nominal_preset_settles_without_touching_the_stops() {
+    const SimResult s = nominalRun();
+    ASSERT_TRUE(!s.left_plate);
+    ASSERT_TRUE(!s.saturated);
+    ASSERT_TRUE(s.settle_time > 1.5 && s.settle_time < 2.2);   // 1.80 measured
+    ASSERT_TRUE(s.final_radius < 0.005);
+}
+
+// "Detuned is recognisably poor without being unstable" — the ticket's own
+// words, and the two halves need separate assertions.  Poor: six times the
+// settling time, which is the difference between watching it arrive and
+// wondering whether it is moving.  Not unstable: it does arrive, to half a
+// millimetre, and it never goes near a travel limit doing it.
+void test_the_detuned_preset_is_sluggish_but_never_unstable() {
+    const SimResult s = runPreset(presetNamed("Detuned"));
+    const SimResult base = nominalRun();
+
+    ASSERT_TRUE(!s.left_plate);
+    ASSERT_TRUE(s.settle_time > 4.0 * base.settle_time);
+    ASSERT_TRUE(s.final_radius < 0.005);
+    ASSERT_TRUE(!s.saturated);
+    // The number the button's own blurb prints: 11 s, against nominal's 1.8.
+    ASSERT_TRUE(s.settle_time > 10.0 && s.settle_time < 13.0);
+    // It does not wander further out than nominal on the way — sluggish, not
+    // wild.  Both start 72.1 mm out and neither adds to it.
+    ASSERT_TRUE(s.peak_radius < base.peak_radius + 0.001);
+}
+
+// "Aggressive visibly overshoots OR saturates."  It saturates, and it is worth
+// being exact about why the first disjunct is not the one satisfied: on this
+// plant the travel limits bite before the ball ever gets past the setpoint, so
+// saturation LIMITS the approach rather than producing an overshoot.  Measured
+// position overshoot past centre is under a millimetre at every tuning that
+// keeps the ball, which is why the surface says "saturates" and not "overshoots".
+void test_the_aggressive_preset_is_fast_and_saturates() {
+    const SimResult s = runPreset(presetNamed("Aggressive"));
+    const SimResult base = nominalRun();
+
+    ASSERT_TRUE(!s.left_plate);
+    ASSERT_TRUE(s.saturated);                    // and nominal, above, does not
+    ASSERT_TRUE(s.settle_time < 0.5 * base.settle_time);
+    ASSERT_TRUE(s.final_radius < 0.005);
+    // The number the button's own blurb prints: 0.6 s.
+    ASSERT_TRUE(s.settle_time > 0.4 && s.settle_time < 0.8);
+    // CONTEXT.md points a visitor at BOTH badges in Plate Control, so both
+    // have to actually light up.  They are different facts: the legs stop at
+    // their travel limits, and separately the triple they were asked for has
+    // no assembly at all.
+    ASSERT_TRUE(s.clipped);
+}
+
+// Why the Aggressive preset is Q = 150 and not the 300 the ticket's own
+// comment proposed.  That comment predates #23, which let the ball leave the
+// plate: a tuning that slams the legs moves the plate out from under the ball
+// rather than tilting under it, and at 300 a nudge throws the ball clean off.
+//
+// The honest statement of where the line is drawn is a comparison, not an
+// absolute — Aggressive is offered because it is no more fragile than the
+// tuning the demo already ships, against the hardest shove the interface can
+// deliver.
+//
+// **This is the EASY half of that claim, and it is worth being clear which
+// half.**  The ball starts at rest at the centre of a level plate against a
+// held setpoint, which is the situation the loop finds least demanding: from
+// rest both tunings survive 0.5 m/s from every direction, and `kMaxNudgeSpeed`
+// used to be set to that.  The demo does not open at rest — it opens tracking a
+// circle, and a shove landing on legs that are already displaced is a much
+// harder question with a much smaller answer.  That envelope is what now sets
+// the slider's ceiling; see
+// `test_a_shove_while_tracking_is_rejected_from_every_direction` in
+// `test_attract_mode`, which is the half that binds.
+//
+// Pinned here rather than left as prose because prose does not fail when
+// somebody raises the slider's ceiling.  Twenty-four directions at the top of
+// the slider: a shove the loop cannot reject is one the demo must not offer,
+// wherever it points.
+void test_aggressive_is_no_more_fragile_than_the_shipped_tuning() {
+    const auto models = getBuiltinModels();
+    const auto& e = cascadeModel(models);
+    const Eigen::MatrixXd agg = gainForPreset(e, presetNamed("Aggressive"));
+    const Eigen::MatrixXd nom = gainForPreset(e, nominalPreset());
+
+    for (int i = 0; i < 24; ++i) {
+        const double th = i * M_PI / 12.0;
+        const Eigen::Vector4d kick(0.0, 0.0,
+                                   kMaxNudgeSpeed * std::cos(th),
+                                   kMaxNudgeSpeed * std::sin(th));
+        ASSERT_TRUE(!runClosedLoop(e, nom, kick, 0.0, 0.0, 8.0).left_plate);
+        ASSERT_TRUE(!runClosedLoop(e, agg, kick, 0.0, 0.0, 8.0).left_plate);
+    }
+}
+
+// Whatever else a preset does, it has to leave a working demo behind: a
+// visitor who clicks one and walks away must not come back to a ball on the
+// floor.  Cheap to state, and the one property all three share.
+void test_every_preset_brings_the_ball_home() {
+    for (const auto& p : lqrPresets()) {
+        const SimResult s = runPreset(p);
+        ASSERT_TRUE(!s.left_plate);
+        ASSERT_TRUE(s.settle_time > 0.0);
+        ASSERT_TRUE(s.final_radius < 0.005);
+    }
+}
+
+}  // namespace
+
+int main() {
+    test_state_vector_layout();
+    test_state_deviation_follows_the_design_home();
+    test_shape_gate();
+    test_plant_identity_survives_the_float_round_trip();
+    test_zero_error_commands_the_home_pose();
+    test_command_is_home_minus_k_error();
+    test_setpoint_moves_the_target();
+    test_the_reference_velocity_enters_as_a_velocity_error();
+    test_the_ball_velocity_weights_set_the_feedforwards_strength();
+    test_command_clamps_to_servo_travel_then_to_the_workspace();
+    test_a_reachable_clamp_is_left_on_the_stop();
+    test_wrong_shape_commands_the_home_pose();
+    test_servo_lag_is_first_order();
+    test_the_servo_cannot_be_driven_faster_than_its_rate_limit();
+    test_a_rate_saturated_leg_has_no_acceleration();
+    test_the_constraint_binds_only_on_a_rising_contact_point();
+    test_the_constraint_leaves_the_tilt_rates_alone();
+    test_untrusted_rates_leave_the_command_alone();
+    test_default_weights_balance_the_ball();
+    test_default_weights_reject_a_nudge();
+    test_setpoint_is_tracked();
+    test_looser_weights_are_visibly_sluggish();
+    test_poor_tuning_visibly_degrades();
+    test_unit_weights_park_in_the_friction_dead_band();
+    test_the_nominal_preset_is_the_startup_tuning();
+    test_the_presets_differ_only_in_the_ball_weights();
+    test_the_lit_button_follows_the_weights();
+    test_the_nominal_preset_settles_without_touching_the_stops();
+    test_the_detuned_preset_is_sluggish_but_never_unstable();
+    test_the_aggressive_preset_is_fast_and_saturates();
+    test_aggressive_is_no_more_fragile_than_the_shipped_tuning();
+    test_every_preset_brings_the_ball_home();
+    std::printf("test_auto_balance: all passed\n");
+    return 0;
+}
