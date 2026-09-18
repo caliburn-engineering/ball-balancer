@@ -1206,6 +1206,118 @@ Decided in [#23](https://github.com/caliburn-engineering/caliburn/issues/23),
 against the reasoning recorded as D8, D9 and D10 in
 `docs/plans/2026-09-09-bouncing-ball-control-decisions.md`.
 
+### Hopping the ball on purpose, with the same three legs
+
+The loop can throw the ball while it is tracking, and **the throw is the
+constraint above with its sign released rather than a second mechanism**.
+`holdContactDown` drives the contact point's normal rate `p` to zero because
+`u_rebound = e·u + p(1 + e)` makes `p ≤ 0` a proof; `stepHop` drives the same
+scalar positive at a contact it chooses.  One function solves both —
+`heaveToContactRate`, which is what `holdContactDown` was before the target was
+a parameter — and it corrects along the leg-rate direction `J_v` maps to pure
+heave, so **the tilt the gain asked for comes out bit for bit unchanged at
+every target**.  That is the differential/common-mode split #23 drew for a
+defensive reason, used for an offensive one, and it is the whole of the answer
+to "how do tracking and hopping share the three legs": they do not share them,
+they use orthogonal directions of the same triple.
+
+**The flight is still #23's.**  From the frame the ball leaves to the frame it
+lands the command is `holdContactDown`'s again, unchanged.  So a commanded hop
+cannot be pumped any more than an accidental one can, the height is bounded by
+the throw that started it rather than by a sweep, and there is no question of
+*which* contact to hop on: the next throw cannot be armed until the train has
+ended, because arming requires a ball on the plate.  Measured over the three
+presets, the worst `p` on any frame the ball entered airborne is **0.0002 m/s**
+— the constraint holding rather than yielding.
+
+**The throw is a ramp, and that is the difference between carrying the ball and
+hitting it.**  `heaveToContactRate` commands a rate by setting a position error
+of `τ·rate`, so a rate asked for flat arrives inside one frame: the plate steps
+straight past the release threshold, the ball is let go at the velocity the
+plate had *before* the step, and the plate then runs into it.  Ramped instead,
+the plate accelerates under the ball and the ball rides it up until the plate
+can outrun gravity.  Measured against the same commanded rate — **one servo lag
+of ramp gives a 53 mm hop and gives the no-pumping constraint up by 0.44 m/s;
+two lags give 24 mm and give it up by 0.0002.**  Three measure the same as two
+and spend half again as much travel.
+
+**Every number is derived from the plant.**
+
+| quantity | rule | shipped plate |
+|---|---|---|
+| release threshold | `z_c` must beat `g·τ`, since a held command decelerates the leg at `α̇/τ` | 0.49 m/s |
+| throw rate | `kHopRiseMargin · g · τ` | 0.736 m/s |
+| stroke | `2τ`, one ramp | 0.10 s |
+| charge | the area under the ramp, `rate·stroke/2` | 36.8 mm |
+| flight and train | `2u / (g(1 − e))` | 2.50 s |
+| speed gate | `(R_table − r_ball) / flight` | 0.112 m/s |
+| hop height | `u² / 2g` | 24.7 mm measured, 27.6 predicted |
+
+The margin on `g·τ` is bounded on **both** sides and the window is narrow.  At
+1.1 the ball never leaves the plate at any point of a lap; at 1.7 the release
+turns from a carry into a strike, the `(1 + e)` term triples the hop and the
+constraint starts being given up; at 3.0 the ball is thrown off the plate.  1.5
+sits below the step with the whole of it in hand.
+
+**What stops it throwing the ball off the plate** — #23's own open question
+about this feature, and the failure mode #23 was opened about — is two gates on
+*arming*.  A throw buys two and a half seconds of a ball the plate can only
+touch at seventeen instants, so the ball's coast has to fit on the plate: that
+is `max_ball_speed`, and it is what takes the eighteen-setting sweep from four
+balls lost to none.  The second is that the tracking command must not already
+be saturated or clipped — a loop on its stops has no authority to spare, and
+heave spends authority.  **Nine of the eighteen settings the sliders offer
+never hop**, and that is the feature working rather than failing: the fast laps
+are exactly the ones whose ball is crossing the plate too quickly, and what
+they get instead is the tracking they had before, unchanged.  The panel says
+so rather than leaving a checkbox that does nothing.
+
+**The workspace cost, which is a charge stroke's worth of heave and nothing
+else.**  The throw is cut short the frame the ball leaves and the flight is the
+constraint's, so 36.8 mm is the whole excursion — and it is a bound rather than
+an aspiration only because the cycle remembers the heave it armed at.  Before
+it did, a throw that failed to let go recharged from wherever the last one left
+the plate, which walked it 101 mm below home on a path whose stated cost was 37
+and lost the ball on 4 of the 18 settings.  What 36.8 mm costs is the tilt the
+plate can still be *held* at from down there: `max_conditioned_tilt` goes from
+**15.63° to 14.52°** and `maxBallAccel` with it, from **1.888 to 1.757 m/s²** —
+**seven per cent of the ball acceleration the plate can command.**
+
+**Tracking is barely touched, and that is not what anyone expected.**  On the
+opening circle, mean error 3.64 mm without the hop and 4.02 mm with it; over
+the nine settings that do hop, hopping tracks *better* than not hopping on
+every one of them (1.84–3.82 mm against 3.68–4.45 mm).  The tilt authority is
+untouched by construction and what a hop costs is contact time, and the loop
+turns out not to need the contact it loses: `predictedLanding` aims the plate
+at the landing point through the flight, and a ball that is arriving at a
+chosen point is a ball whose lag has been cancelled rather than integrated.
+
+**`bounceFloorSpeed` does not terminate a commanded hop, and the margin is a
+factor of two rather than the two orders that constant's header implied.**  #34
+owned this question and the answer overturns the reasoning rather than the
+number.  The floor bounds the *relative* rebound at an impact; at a release the
+ball and plate are nearly comoving by construction, so what the floor tests is
+small at exactly the moment a hop begins.  A throw does resolve an impact on
+the frame it lets go — 7 of 8 at 60 Hz — because the plate is still climbing
+the ramp and runs into the ball it just released.  Measured, the rebound clears
+the floor by 1.2 to 1.8, and **that factor does not improve as the frame
+shrinks**: the plate gains `margin·g·dt/2` of rise a frame and the ball falls
+`g·dt/2` against it, so the ratio is about `e(1 + margin)` and `dt` cancels.
+Moving the floor to `g·dt` stops the controller hopping at all, which is where
+the edge was found rather than argued for.
+
+**It needs a frame rate that can resolve the stroke, and fails safe when it
+does not.**  Below about 45 Hz the ramp crosses `g·τ` in too few frames and the
+plate lifts the ball and sets it down again: no hop, no separation, and the
+tracking exactly as it was.  Above it the hop is 17–47 mm from 45 to 240 Hz and
+no setting loses the ball.  At 240 Hz the constraint is given up by 0.54 m/s
+during flight, which is the same yielding `holdContactDown` documents at the
+finest step and not the hop's doing.
+
+Decided in [#34](https://github.com/caliburn-engineering/caliburn/issues/34),
+against D8's "the same actuator with the sign released" and the questions the
+decision record left open under *Deliberately not decided*.
+
 ### Losing the ball, and saying so
 
 A lost ball used to be a silent teleport.  `ball_auto_reset_` defaulted **true**

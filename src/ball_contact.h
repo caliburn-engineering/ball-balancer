@@ -313,9 +313,28 @@ inline constexpr double kRestitution = 0.94;
 /// the frame rate rather than with the ball, so a faster simulation resolves
 /// finer bounces instead of inheriting a number tuned at 60 Hz.  And at 60 Hz
 /// it is 0.082 m/s — a 0.34 mm hop, an order below the millimetres the shipped
-/// tuning's own passive hop reaches and further still below anything a
-/// deliberate hop would ask for.  A ball that is genuinely hopping cannot reach
-/// it.
+/// tuning's own passive hop reaches.
+///
+/// **What this used to say next was "a ball that is genuinely hopping cannot
+/// reach it", and #34 measured it and it is not that simple.**  The claim
+/// compared the floor to a hop's HEIGHT, and the floor bounds the RELATIVE
+/// rebound at an impact, which is a different quantity.  At the instant a
+/// controller throws the ball, the ball and the plate are nearly comoving by
+/// construction — the ball leaves carrying the plate's velocity — so what the
+/// floor tests is small at exactly the moment a deliberate hop begins, even
+/// though the hop itself is seventy times the height the floor can represent.
+/// And a throw does resolve an impact on the frame it lets go, because the
+/// plate is still accelerating upward and runs into the ball it just released:
+/// measured, 7 of 8 throws at 60 Hz.
+///
+/// Measured, a commanded hop clears the floor by a factor of 1.2 to 1.8, and
+/// **that factor does not improve as the frame shrinks**: the plate gains
+/// `kHopRiseMargin g dt / 2` of rise a frame while the throw ramps and the ball
+/// falls `g dt / 2` against it, so the rebound is about
+/// `e (1 + kHopRiseMargin)` times the floor and `dt` cancels.  Moving the floor
+/// to `g dt` stops the controller hopping at all.  So the rule stands, the
+/// margin is a factor of about two rather than the two orders this paragraph
+/// used to imply, and `test_hop_drive` pins both ends of it.
 inline constexpr double bounceFloorSpeed(double gravity, double dt) {
     return 0.5 * gravity * dt;
 }

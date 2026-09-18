@@ -132,6 +132,7 @@ add_library(ball_dynamics STATIC
     src/attract_mode.cpp
     src/ball_contact.cpp
     src/setpoint_path.cpp
+    src/hop_drive.cpp
     src/trajectory_controls.cpp
     src/sim_step.cpp
     src/loss_cause.cpp
@@ -237,6 +238,11 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(test_loss_cause PRIVATE ball_dynamics)
     target_include_directories(test_loss_cause PRIVATE tests)
     add_test(NAME test_loss_cause COMMAND test_loss_cause)
+
+    add_executable(test_hop_drive tests/test_hop_drive.cpp)
+    target_link_libraries(test_hop_drive PRIVATE ball_dynamics)
+    target_include_directories(test_hop_drive PRIVATE tests)
+    add_test(NAME test_hop_drive COMMAND test_hop_drive)
 
     add_executable(test_attract_mode tests/test_attract_mode.cpp)
     target_link_libraries(test_attract_mode PRIVATE ball_dynamics)

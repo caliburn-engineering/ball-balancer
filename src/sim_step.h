@@ -5,6 +5,7 @@
 #include "auto_balance.h"
 #include "ball_contact.h"
 #include "ball_sim.h"
+#include "hop_drive.h"
 #include "setpoint_path.h"
 #include "table_kinematics.h"
 
@@ -168,6 +169,11 @@ struct SimState {
     /// How far round the lap the setpoint is, in [0, 1), ACCUMULATED — never
     /// derived from elapsed time.  See `advancePhase` and #24.
     double path_phase = 0.0;
+
+    /// Where the hopping controller is in its charge-throw-flight cycle.
+    /// Beside the path phase for the same reason: it is a fact one frame hands
+    /// to the next, and `stepSim` is what advances it.
+    HopCycle hop{};
 };
 
 /// A plate standing at home with its ball at `ball0`, ready for the first step.
@@ -209,6 +215,20 @@ struct SimInput {
     /// Whether the ball is simulated at all.  The plate still moves when it is
     /// not: the pose and the plate motion are what the 3D view draws.
     bool ball_enabled = true;
+
+    /// Whether the loop THROWS the ball as well as tracking it.
+    ///
+    /// It needs a ball to throw and a gain to throw it with, so it is ignored
+    /// unless `ball_enabled` and `closed_loop` are both true — the open-loop
+    /// sliders own the whole leg triple, heave included, and a hop superimposed
+    /// on them would be fighting the visitor's own hand.
+    ///
+    /// The tracking half is untouched by it: `heaveToContactRate` corrects
+    /// along the leg-rate direction that maps to pure heave, so the tilt the
+    /// gain asked for comes out bit for bit unchanged.  What the ball being in
+    /// the air costs the tracking is a separate matter and is measured in
+    /// `test_hop_drive`.  See #34.
+    bool hop_enabled = false;
 };
 
 /// What the step did, and what it saw on the way.
@@ -279,6 +299,11 @@ struct SimReport {
     /// COUNT cannot stand in for it: "never lets go" and "never lets go, with a
     /// sixth of a g to spare" are different claims about the same demo.
     double normal_accel = 0.0;
+
+    /// Where the hopping controller is in its cycle, at the end of the frame.
+    /// `HopPhase::Off` whenever `SimInput::hop_enabled` is false, so a caller
+    /// can read this instead of remembering what it asked for.
+    HopPhase hop_phase = HopPhase::Off;
 
     /// The ball's contact patch has left the disc.  Reported, never acted on:
     /// the application resets or freezes according to a checkbox, and a

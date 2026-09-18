@@ -265,6 +265,14 @@ private:
     bool ball_enabled_ = true;
     bool ball_on_plate_ = true;
 
+    /// Whether the loop throws the ball as well as tracking it.
+    ///
+    /// Off by default, because it is a thing to be shown rather than the
+    /// demo's resting state: the opening is a ball tracing a circle, and a
+    /// visitor who has not asked for a bouncing one should not be handed one.
+    /// See `hop_drive.h` and #34.
+    bool hop_enabled_ = false;
+
     /// The escape hatch, and it defaults OFF now.
     ///
     /// It used to default on, and what that amounted to was the demo's most

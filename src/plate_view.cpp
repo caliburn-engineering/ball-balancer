@@ -375,6 +375,7 @@ void PlateView::step(GLFWwindow* window, float dt) {
     in.design = design_;
     in.closed_loop = loopDriving();
     in.ball_enabled = ball_enabled_ && ball_on_plate_;
+    in.hop_enabled = hop_enabled_;
 
     // --- Where the leg commands come from, while the loop is not driving ---
     //
@@ -824,6 +825,62 @@ void PlateView::drawBalanceControls() {
             ImGui::TextDisabled(
                 "corner fillet %.0f mm (the %.2f m/s\xc2\xb2 the ball can take)",
                 filletRadius(traj_.path()) * 1000.0, traj_.path().accel_max);
+    }
+
+    // --- Hopping ---
+    //
+    // Beside the trajectory rather than beside the ball, because it is a thing
+    // the loop does with the reference and not a property of the ball: the
+    // same three legs track with their differential motion and throw with
+    // their common-mode one.  See `hop_drive.h` and #34.
+    ImGui::Checkbox("Hop the ball", &hop_enabled_);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted(
+            "The three legs go down together and then up, so the plate throws "
+            "the ball, while the loop goes on tracking with the tilt.  It is "
+            "the no-pumping constraint with its sign released: the same heave "
+            "the loop is forbidden to add while the ball is airborne is what "
+            "throws it while the ball is on the plate.");
+        ImGui::Separator();
+        ImGui::TextUnformatted(
+            "A throw is refused while the ball is crossing the plate faster "
+            "than its own flight can be caught, and while the loop is already "
+            "against its stops.  On the fast laps that means it never fires, "
+            "and the line below says so.");
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+    if (hop_enabled_) {
+        const HopSizing hop = hopSizing(
+            plate_.gravity(), design_.servo_tau,
+            kinematics().params().R_table - kBallRadius);
+        switch (report_.hop_phase) {
+            case HopPhase::Waiting:
+                ImGui::TextDisabled("waiting - the ball is over %.0f mm/s, or "
+                                    "the loop is on its stops",
+                                    hop.max_ball_speed * 1000.0);
+                break;
+            case HopPhase::Charge:
+                ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
+                                   "charging - all three legs down %.0f mm",
+                                   hop.drop_m * 1000.0);
+                break;
+            case HopPhase::Throw:
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+                                   "throwing - the contact point up to "
+                                   "%.0f mm/s", hop.rise_rate * 1000.0);
+                break;
+            case HopPhase::Flight:
+                ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.15f, 1.0f),
+                                   "thrown %d - the plate may not lift into it",
+                                   sim_.hop.thrown);
+                break;
+            case HopPhase::Off:
+                ImGui::TextDisabled("off");
+                break;
+        }
     }
 
     // The setpoint sliders stay visible and go read-only under a path, for the

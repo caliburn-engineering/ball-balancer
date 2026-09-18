@@ -136,12 +136,37 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
         // bounce and feeds in about 5% an impact against the 12% `e^2` takes
         // out.  Constraining that one scalar makes non-pumping a proof; see
         // `holdContactDown` and the decision record's D8.
-        if (s.ball.airborne) {
+        //
+        // And the hop is the same solve with the sign released.  A charge asks
+        // the contact point to descend and a throw asks it to rise, through
+        // `heaveToContactRate` — the function the constraint goes through — so
+        // the tilt the gain just asked for comes out bit for bit unchanged
+        // either way.  The hop never drives a flight: from the frame the ball
+        // leaves to the frame it lands the command is the constraint's again,
+        // which is what bounds the hop by the throw that started it.  See #34.
+        const HopDemand hop =
+            stepHop(hopSizing(g, in.design.servo_tau,
+                               plate.params().R_table - r_ball),
+                    s.hop, in.hop_enabled && in.ball_enabled, s.ball.airborne,
+                    !c.saturated && !c.clipped_to_holdable,
+                    Eigen::Vector2d(bp(3), bp(4)).norm(), s.pose.z_c, in.dt);
+        if (hop.drive) {
+            cmd_rad = heaveToContactRate(tk, in.design, s.motion, s.alpha_rad,
+                                         cmd_rad, bp.head<3>(),
+                                         hop.contact_rate);
+        } else if (s.ball.airborne) {
             cmd_rad = holdContactDown(tk, in.design, s.motion, s.alpha_rad,
                                       cmd_rad, bp.head<3>());
         }
+    } else {
+        // The open-loop sliders own the whole leg triple, heave included, so a
+        // hop superimposed on them would fight the visitor's own hand.  Reset
+        // rather than freeze: opening the loop again must not resume into a
+        // half-charged plate.
+        s.hop = HopCycle{};
     }
     out.cmd_rad = cmd_rad;
+    out.hop_phase = s.hop.phase;
 
     // --- 3. The servos ---
     //

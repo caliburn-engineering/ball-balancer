@@ -244,6 +244,71 @@ Eigen::Vector2d predictedLanding(const Eigen::Matrix<double, 6, 1>& ball_plate,
                                  double ball_radius,
                                  double gravity);
 
+/// How fast this command would have the plate's contact point under the ball
+/// rising, in m/s along the plate normal — the `p` of
+/// `u_rebound = e u + p (1 + e)`, asked of a command rather than of a plate.
+///
+/// The command is put through the same servo model the plate is stepped with,
+/// so what comes back is the rate the legs would actually move at and not the
+/// rate an unlimited servo would have been asked for.  Everything else about
+/// the plate — where it is, which way it faces — is as it stands, because that
+/// is what a command is evaluated against.
+///
+/// One expression of it rather than three.  `holdContactDown` tests it,
+/// `heaveToContactRate` cancels it, and the harnesses measure it; each of those
+/// wrote out the same `servoRate` -> `J_v` -> `contactNormalRate` chain, which
+/// is three chances to disagree about the quantity the whole bounce argument
+/// turns on.
+double commandedContactRate(const TableKinematics& tk,
+                            const AutoBalanceDesign& d,
+                            const PlateMotion& plate,
+                            const std::array<double, 3>& alpha_rad,
+                            const std::array<double, 3>& cmd_rad,
+                            const Eigen::Vector3d& ball_s);
+
+/// The command re-aimed so its contact point under the ball moves at exactly
+/// `target_rate`, with every tilt rate left bit for bit alone.
+///
+/// **This is the one heave actuator, and its sign is the caller's.**  The
+/// correction is the leg rate `J_v` maps to pure heave — `J_v^-1 (0, 0, dz)` —
+/// so `phi_dot`, `theta_dot` and `omega` come out unchanged whatever
+/// `target_rate` is.  A uniform `(1, 1, 1)` nudge would have been the obvious
+/// reading of "common-mode" and is not the same thing away from the symmetric
+/// pose, where it tilts the plate slightly as it lifts it.
+///
+/// Two callers, opposite signs, one mechanism — which is the whole of
+/// [#34](https://github.com/caliburn-engineering/caliburn/issues/34)'s claim to
+/// be #23's second half rather than a second machine:
+///
+///   - `holdContactDown` drives it to **zero** while the ball is airborne, and
+///     `p <= 0` bounds the apex ratio by `e^2` however hard the loop is working.
+///   - `stepHop` drives it **positive** at a contact the controller chose, and
+///     `u_rebound = e u + p (1 + e)` throws the ball.
+///
+/// The correction is an increment on the command, so for a leg already pinned
+/// at `alpha_rate_max` it is deliberately a no-op: a saturated leg does not
+/// move faster when its command moves further, so the target YIELDS wherever
+/// the servo has run out of speed.  See `holdContactDown` for the three ways
+/// that was tried the other way round and what each cost.
+///
+/// The result is clamped to the servo travel and retreated into the holdable
+/// set like any other command, for #22's and #29's reasons.  That retreat
+/// scales the triple back toward the level pose, which is HIGHER than the one
+/// being asked for, so it can put back a little of the heave just removed —
+/// the second place a target is given up, and `SimReport::contact_normal_rate`
+/// is where both of them show.
+///
+/// Returns `cmd_rad` unchanged when there is no lag to convert a rate into a
+/// command, when `plate.rates_trustworthy` is false, and for a plate past
+/// vertical, which has no "up" to solve for.
+std::array<double, 3> heaveToContactRate(const TableKinematics& tk,
+                                         const AutoBalanceDesign& d,
+                                         const PlateMotion& plate,
+                                         const std::array<double, 3>& alpha_rad,
+                                         const std::array<double, 3>& cmd_rad,
+                                         const Eigen::Vector3d& ball_s,
+                                         double target_rate);
+
 /// The leg command with its heave held down until the plate's contact point
 /// under the ball cannot rise.  **The no-pumping constraint, and it is a proof
 /// rather than a measurement.**
