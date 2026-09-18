@@ -254,11 +254,13 @@ Eigen::Vector2d predictedLanding(const Eigen::Matrix<double, 6, 1>& ball_plate,
 /// the plate — where it is, which way it faces — is as it stands, because that
 /// is what a command is evaluated against.
 ///
-/// One expression of it rather than three.  `holdContactDown` tests it,
-/// `heaveToContactRate` cancels it, and the harnesses measure it; each of those
-/// wrote out the same `servoRate` -> `J_v` -> `contactNormalRate` chain, which
-/// is three chances to disagree about the quantity the whole bounce argument
-/// turns on.
+/// One expression of it rather than three.  `holdContactDown` tests it and
+/// `heaveToContactRate` cancels it, and both used to write out the same
+/// `servoRate` -> `J_v` -> `contactNormalRate` chain — two chances to disagree
+/// about the quantity the whole bounce argument turns on.  The harnesses build
+/// a moving plate of their own and ask `contactNormalRate` directly, which is a
+/// fixture rather than a third copy: it starts from a pose and a leg rate
+/// chosen by hand, where this starts from a command and a plate.
 double commandedContactRate(const TableKinematics& tk,
                             const AutoBalanceDesign& d,
                             const PlateMotion& plate,
@@ -288,8 +290,9 @@ double commandedContactRate(const TableKinematics& tk,
 /// The correction is an increment on the command, so for a leg already pinned
 /// at `alpha_rate_max` it is deliberately a no-op: a saturated leg does not
 /// move faster when its command moves further, so the target YIELDS wherever
-/// the servo has run out of speed.  See `holdContactDown` for the three ways
-/// that was tried the other way round and what each cost.
+/// the servo has run out of speed.  That is the decision rather than an
+/// accident of the arithmetic, and the implementation records the three ways
+/// it was tried the other way round and what each cost.
 ///
 /// The result is clamped to the servo travel and retreated into the holdable
 /// set like any other command, for #22's and #29's reasons.  That retreat

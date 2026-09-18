@@ -267,11 +267,9 @@ std::array<double, 3> heaveToContactRate(const TableKinematics& tk,
     // set is not, and `legCommand` retreats into it for the reason #22 and #29
     // between them establish — a command the plate cannot be HELD at costs the
     // loop the assembly it is steering in.  Dropped here, the over-aggressive
-    // sweep loses all 90 and spends 2070 frames on the wrong assembly.  The
-    // retreat scales the triple back toward the level pose, which is HIGHER
-    // than the one being asked for, so it can put back a little of the heave
-    // just removed.  That is the second place the target is given up, and
-    // `SimReport::contact_normal_rate` is where both of them show.
+    // sweep loses all 90 and spends 2070 frames on the wrong assembly.  It is
+    // also the second place the target is given up; the header says what that
+    // costs.
     return commandRetreatedToHoldable(tk, d, out);
 }
 

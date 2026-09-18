@@ -92,6 +92,18 @@ public:
         return p;
     }
 
+    /// How big a hop is on THIS plate, given the servo it is thrown by.
+    ///
+    /// Here for `feasible`'s reason: every argument but the lag is the plate's,
+    /// and the room the ball has to come down in is `R_table - r_ball` — a
+    /// radius each caller would otherwise subtract for itself.  The step and
+    /// the application both ask, and two transcriptions of a ball radius is how
+    /// they come to size two different hops.  See #34.
+    HopSizing hopSizing(double servo_tau) const {
+        return caliburn::hopSizing(gravity_, servo_tau,
+                                   tk_.params().R_table - ballRadius());
+    }
+
     /// The simulated ball's radius.  One ball — see `kPlateBall`.
     static constexpr double ballRadius() { return kPlateBall.radius; }
 
@@ -304,6 +316,12 @@ struct SimReport {
     /// `HopPhase::Off` whenever `SimInput::hop_enabled` is false, so a caller
     /// can read this instead of remembering what it asked for.
     HopPhase hop_phase = HopPhase::Off;
+
+    /// Throws that have actually let the ball go since the hop was switched on.
+    /// Off the report rather than read out of `SimState` for the reason
+    /// everything else here is: what a frame hands to the NEXT frame is the
+    /// state, and what it hands back to its caller is this.
+    int hops_thrown = 0;
 
     /// The ball's contact patch has left the disc.  Reported, never acted on:
     /// the application resets or freezes according to a checkbox, and a

@@ -476,18 +476,12 @@ void test_a_rate_saturated_leg_has_no_acceleration() {
 // arrived with.  These pin it against plates built by hand, where the answer is
 // known; `test_attract_mode` pins that it survives the closed loop.
 
-/// A plate at home with its legs being driven at a chosen rate, assembled the
-/// way `stepSim` assembles one.
-PlateMotion movingPlate(const TableKinematics& tk, const TablePose& pose,
-                        const std::array<double, 3>& alpha,
-                        const std::array<double, 3>& cmd, double tau) {
-    const std::array<double, 3> rate =
-        servoRate(alpha, cmd, tau, tk.params().alpha_rate_max);
-    return plateMotion(tk, pose, alpha, rate, servoAccel(rate, tau,
-                                                         tk.params().alpha_rate_max));
-}
-
 /// How fast a command has the contact point under `s` rising, in m/s.
+///
+/// Built from a pose and a command by hand, where `commandedContactRate` reads
+/// a plate the step already assembled.  The two agree by construction — this
+/// one supplies the plate — and keeping it separate is what lets these tests
+/// ask the question of a plate nobody stepped.
 double riseUnder(const TableKinematics& tk, const TablePose& pose,
                  const std::array<double, 3>& alpha,
                  const std::array<double, 3>& cmd, double tau,

@@ -125,14 +125,19 @@ struct HopSizing {
     /// version refuses to hop at all on the 180 mm paths, which measure
     /// perfectly safe.
     ///
-    /// It comes out at 0.104 m/s on the shipped plate, and the sweep agrees to
-    /// the resolution it was run at: over the 18 shape-size-lap settings the
-    /// sliders offer, a gate at 0.10 loses the ball on none and a gate that
-    /// lets everything through loses it on four — all four of them a polygon at
-    /// its fastest offered lap, where the ball is crossing the plate at a
-    /// quarter of a metre a second.  What the refused settings get is the
-    /// tracking they had before, which is the honest thing for a demo to do
-    /// with a feature that does not fit: nine of the eighteen never hop.
+    /// It comes out at 0.112 m/s on the shipped plate — 0.28 m of room against
+    /// a 2.50 s train — and the sweep the derivation was checked against agrees
+    /// to the resolution it was run at.  Over the 18 shape-size-lap settings
+    /// the sliders offer: a gate that lets everything through loses the ball on
+    /// **four**, all four of them a polygon at its fastest offered lap where
+    /// the ball is crossing the plate at a quarter of a metre a second; a gate
+    /// at 0.10 loses it on none; and the derived 0.112 that ships loses it on
+    /// none either — `test_hop_drive` is what pins that, at the shipped value
+    /// rather than at the exploratory one.
+    ///
+    /// What the refused settings get is the tracking they had before, bit for
+    /// bit, which is the honest thing for a demo to do with a feature that does
+    /// not fit: nine of the eighteen never hop.
     double max_ball_speed = 0.0;
 };
 
@@ -199,6 +204,34 @@ struct HopCycle {
     double z_arm = 0.0;
 };
 
+/// What the cycle is shown of the frame it is deciding about.
+///
+/// Bundled rather than passed as six positional arguments, three of them
+/// adjacent bools: `stepHop(size, cycle, true, false, true, 0.0, z, dt)` is a
+/// call nobody can read and any pair of which can be swapped silently.
+struct HopFrame {
+    /// Whether the hop is switched on at all.  False RESETS the cycle rather
+    /// than pausing it, so switching the hop off mid-throw does not leave a
+    /// half-charged plate to resume into.
+    bool enabled = false;
+
+    /// Whether the ball is off the plate.  The flight is #23's, not the hop's.
+    bool airborne = false;
+
+    /// Whether the TRACKING command — the one the gain produced, before any
+    /// heave correction — is inside the servo travel and inside the holdable
+    /// set.  See `stepHop` for why a loop on its stops may not throw.
+    bool loop_has_room = false;
+
+    /// How fast the ball is crossing the plate, in m/s, against
+    /// `HopSizing::max_ball_speed`.
+    double ball_speed = 0.0;
+
+    /// The plate's heave, in metres.  The only thing the cycle knows about the
+    /// mechanism, and what the strokes end on — see `HopCycle::z_arm`.
+    double plate_z = 0.0;
+};
+
 /// What the cycle wants of the plate's contact point this frame.
 struct HopDemand {
     /// False leaves the command alone — the loop tracks, and `holdContactDown`
@@ -214,42 +247,35 @@ struct HopDemand {
 ///
 /// **Once per landing, never inside a bounce train**, and that is the answer to
 /// "which contact to hop on".  A throw is armed by the ball being ON the plate,
-/// and the train that follows one is about 16 times the first flight at
+/// and the train that follows one is about seventeen times the first flight at
 /// `e = 0.94` — so hopping at every impact would be a different feature, and a
 /// pumped one.  The flight belongs to `holdContactDown` from the frame the ball
 /// leaves to the frame it lands, which is what bounds the hop height by the
 /// throw rather than by a measurement.
 ///
-/// `enabled` false resets the cycle rather than pausing it, so switching the
-/// hop off mid-throw does not leave a half-charged plate to resume into.
-///
-/// `plate_z` is the plate's heave this frame, and it is the only thing the
-/// cycle knows about the mechanism.  The strokes end on TRAVEL rather than on
-/// their timers — see `HopCycle::z_arm` — and the timers are the backstop for a
-/// plate that cannot deliver the travel, so that a hop against the servo stops
-/// stalls rather than marching.
-///
 /// **Two gates on ARMING are what stop the hop throwing the ball off the
 /// plate**, which is #23's own open question about this feature and the failure
 /// mode #23 was opened about:
 ///
-///   - **`ball_speed` against `HopSizing::max_ball_speed`.**  A throw hands the
-///     ball two and a half seconds of coasting, and the coast has to fit on the
-///     plate.  This is the one that does the work: it is what takes the sweep
-///     from four balls lost of eighteen settings to none.
-///   - **`loop_has_room`**, true while the TRACKING command — the one the gain
-///     produced, before any heave correction — is inside the servo travel and
-///     inside the holdable set.  A loop already on its stops has no authority
-///     to spare and heave spends authority.  Measured on the 180 mm square at
-///     its fastest offered lap, hopping regardless walks the ball out to 200 mm
-///     and off the rim with `saturated` and `clipped` set on every frame of the
-///     way out.
+///   - **`HopFrame::ball_speed` against `HopSizing::max_ball_speed`.**  A throw
+///     hands the ball two and a half seconds of coasting, and the coast has to
+///     fit on the plate.  This is the one that does the work: it is what takes
+///     the sweep from four balls lost of eighteen settings to none.
+///   - **`HopFrame::loop_has_room`.**  A loop already on its stops has no
+///     authority to spare and heave spends authority.  Measured on the 180 mm
+///     square at its fastest offered lap, hopping regardless walks the ball out
+///     to 200 mm and off the rim with `saturated` and `clipped` set on every
+///     frame of the way out.
 ///
 /// Both gate arming rather than the stroke in progress: a hop that has already
 /// charged is carried through to its throw, because a plate left low is worse
 /// than a plate that finished what it started.
-HopDemand stepHop(const HopSizing& size, HopCycle& c,
-                  bool enabled, bool airborne, bool loop_has_room,
-                  double ball_speed, double plate_z, double dt);
+///
+/// The strokes end on TRAVEL rather than on their timers — see
+/// `HopCycle::z_arm` — and the timers are the backstop for a plate that cannot
+/// deliver the travel, so that a hop against the servo stops stalls rather than
+/// marching.
+HopDemand stepHop(const HopSizing& size, HopCycle& cycle,
+                  const HopFrame& frame, double dt);
 
 }  // namespace caliburn

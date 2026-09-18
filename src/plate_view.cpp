@@ -853,9 +853,7 @@ void PlateView::drawBalanceControls() {
         ImGui::EndTooltip();
     }
     if (hop_enabled_) {
-        const HopSizing hop = hopSizing(
-            plate_.gravity(), design_.servo_tau,
-            kinematics().params().R_table - kBallRadius);
+        const HopSizing hop = plate_.hopSizing(design_.servo_tau);
         switch (report_.hop_phase) {
             case HopPhase::Waiting:
                 ImGui::TextDisabled("waiting - the ball is over %.0f mm/s, or "
@@ -863,9 +861,14 @@ void PlateView::drawBalanceControls() {
                                     hop.max_ball_speed * 1000.0);
                 break;
             case HopPhase::Charge:
+                // The plate's heave, which is what `drop_m` is — the three legs
+                // move together but not by equal angles, because the correction
+                // is the leg rate `J_v` maps to pure heave rather than a
+                // uniform (1, 1, 1).  Saying "the legs down 37 mm" would be
+                // saying the wrong quantity in the wrong unit.
                 ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f),
-                                   "charging - all three legs down %.0f mm",
-                                   hop.drop_m * 1000.0);
+                                   "charging - the legs take the plate down "
+                                   "%.0f mm", hop.drop_m * 1000.0);
                 break;
             case HopPhase::Throw:
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
@@ -875,7 +878,7 @@ void PlateView::drawBalanceControls() {
             case HopPhase::Flight:
                 ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.15f, 1.0f),
                                    "thrown %d - the plate may not lift into it",
-                                   sim_.hop.thrown);
+                                   report_.hops_thrown);
                 break;
             case HopPhase::Off:
                 ImGui::TextDisabled("off");

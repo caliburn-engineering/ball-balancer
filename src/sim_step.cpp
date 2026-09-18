@@ -144,12 +144,14 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
         // either way.  The hop never drives a flight: from the frame the ball
         // leaves to the frame it lands the command is the constraint's again,
         // which is what bounds the hop by the throw that started it.  See #34.
+        HopFrame hf;
+        hf.enabled = in.hop_enabled && in.ball_enabled;
+        hf.airborne = s.ball.airborne;
+        hf.loop_has_room = !c.saturated && !c.clipped_to_holdable;
+        hf.ball_speed = Eigen::Vector2d(bp(3), bp(4)).norm();
+        hf.plate_z = s.pose.z_c;
         const HopDemand hop =
-            stepHop(hopSizing(g, in.design.servo_tau,
-                               plate.params().R_table - r_ball),
-                    s.hop, in.hop_enabled && in.ball_enabled, s.ball.airborne,
-                    !c.saturated && !c.clipped_to_holdable,
-                    Eigen::Vector2d(bp(3), bp(4)).norm(), s.pose.z_c, in.dt);
+            stepHop(plate.hopSizing(in.design.servo_tau), s.hop, hf, in.dt);
         if (hop.drive) {
             cmd_rad = heaveToContactRate(tk, in.design, s.motion, s.alpha_rad,
                                          cmd_rad, bp.head<3>(),
@@ -160,13 +162,17 @@ SimReport stepSim(const SimPlate& plate, const SimInput& in, SimState& s) {
         }
     } else {
         // The open-loop sliders own the whole leg triple, heave included, so a
-        // hop superimposed on them would fight the visitor's own hand.  Reset
-        // rather than freeze: opening the loop again must not resume into a
-        // half-charged plate.
-        s.hop = HopCycle{};
+        // hop superimposed on them would fight the visitor's own hand.  Through
+        // `stepHop` rather than by assigning a fresh cycle, because what a
+        // disabled hop does to its state is `stepHop`'s rule and a second copy
+        // of it here is a second chance to disagree — it resets rather than
+        // freezes, so opening the loop again cannot resume into a half-charged
+        // plate.
+        stepHop(plate.hopSizing(in.design.servo_tau), s.hop, HopFrame{}, in.dt);
     }
     out.cmd_rad = cmd_rad;
     out.hop_phase = s.hop.phase;
+    out.hops_thrown = s.hop.thrown;
 
     // --- 3. The servos ---
     //

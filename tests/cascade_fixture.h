@@ -23,6 +23,7 @@
 #include "analysis/lqr.h"
 #include "analysis/model_library.h"
 #include "auto_balance.h"
+#include "ball_contact.h"
 #include "ball_sim.h"
 #include "rolling_dynamics.h"
 #include "table_kinematics.h"
@@ -79,6 +80,29 @@ inline bool onBuiltAssembly(const TableKinematics& tk,
     return std::abs(level.pose.phi - pose.phi) < 1e-6 &&
            std::abs(level.pose.theta - pose.theta) < 1e-6 &&
            std::abs(level.pose.z_c - pose.z_c) < 1e-6;
+}
+
+/// A plate at a chosen pose with its legs being driven toward a chosen command,
+/// assembled the way `stepSim` assembles one.
+///
+/// **A fixture, not a copy of the loop.**  It starts from a pose and a command
+/// picked by hand rather than from a gain and a ball, which is the layer
+/// `test_ball_contact` works at and the opposite of carrying the causal order
+/// — see `sim_step.h`.  What it must not do is disagree with the application
+/// about what a servo IS, so it goes through `servoRate` and `servoAccel` like
+/// everything else.
+///
+/// Here rather than in either test file because `test_auto_balance` pins the
+/// no-pumping constraint with it and `test_hop_drive` pins the throw, and the
+/// two are claims about the same plate.  A second transcription is how they
+/// would come to disagree about it.
+inline PlateMotion movingPlate(const TableKinematics& tk, const TablePose& pose,
+                               const std::array<double, 3>& alpha,
+                               const std::array<double, 3>& cmd, double tau) {
+    const double rate_max = tk.params().alpha_rate_max;
+    const std::array<double, 3> rate = servoRate(alpha, cmd, tau, rate_max);
+    return plateMotion(tk, pose, alpha, rate,
+                       servoAccel(rate, tau, rate_max));
 }
 
 /// The plate itself.  `legCommand` needs it because the servo travel limits

@@ -54,11 +54,19 @@ HopSizing roundSizing() {
     return s;
 }
 
+/// One frame in which everything the gates look at is in order.
+HopFrame ready(double plate_z) {
+    HopFrame f;
+    f.enabled = true;
+    f.loop_has_room = true;
+    f.plate_z = plate_z;
+    return f;
+}
+
 /// Drive the cycle with the plate doing exactly what it is asked, so the
 /// travel conditions behave.  Returns the demand and moves `z`.
-HopDemand run(const HopSizing& size, HopCycle& c, double& z, double dt,
-              bool airborne = false, bool room = true, double speed = 0.0) {
-    const HopDemand d = stepHop(size, c, true, airborne, room, speed, z, dt);
+HopDemand run(const HopSizing& size, HopCycle& c, double& z, double dt) {
+    const HopDemand d = stepHop(size, c, ready(z), dt);
     if (d.drive) z += d.contact_rate * dt;
     return d;
 }
@@ -105,7 +113,7 @@ void test_disabling_the_hop_forgets_the_cycle() {
     for (int k = 0; k < 4; ++k) run(size, c, z, 1.0 / 60.0);
     ASSERT_TRUE(c.phase == HopPhase::Charge);
 
-    const HopDemand off = stepHop(size, c, false, false, true, 0.0, z, 1.0 / 60.0);
+    const HopDemand off = stepHop(size, c, HopFrame{}, 1.0 / 60.0);
     ASSERT_TRUE(!off.drive);
     ASSERT_TRUE(c.phase == HopPhase::Off);
     ASSERT_NEAR(c.phase_s, 0.0, 1e-12);
@@ -181,7 +189,7 @@ void test_the_strokes_end_on_travel_with_the_timer_as_a_backstop() {
     double z = 0.2;
     int k = 0;
     for (; k < 100 && fast.phase != HopPhase::Throw; ++k) {
-        stepHop(size, fast, true, false, true, 0.0, z, dt);
+        stepHop(size, fast, ready(z), dt);
         z -= 0.02;                                  // 20 mm a frame
     }
     ASSERT_TRUE(fast.phase == HopPhase::Throw);
@@ -193,7 +201,7 @@ void test_the_strokes_end_on_travel_with_the_timer_as_a_backstop() {
     double held = 0.2;
     int frames = 0;
     for (; frames < 100 && stuck.phase != HopPhase::Throw; ++frames)
-        stepHop(size, stuck, true, false, true, 0.0, held, dt);
+        stepHop(size, stuck, ready(held), dt);
     ASSERT_TRUE(stuck.phase == HopPhase::Throw);
     ASSERT_NEAR(frames * dt, size.stroke_s, 2.0 * dt);
 }
@@ -227,14 +235,16 @@ void test_the_flight_belongs_to_the_constraint() {
     const double dt = 1.0 / 60.0;
     for (int k = 0; k < 8; ++k) run(size, c, z, dt);
 
-    const HopDemand d = stepHop(size, c, true, /*airborne=*/true, true, 0.0, z, dt);
+    HopFrame flying = ready(z);
+    flying.airborne = true;
+    const HopDemand d = stepHop(size, c, flying, dt);
     ASSERT_TRUE(!d.drive);
     ASSERT_TRUE(c.phase == HopPhase::Flight);
     ASSERT_EQ(c.thrown, 1);
 
     // And a whole train of it changes nothing.
     for (int k = 0; k < 200; ++k) {
-        ASSERT_TRUE(!stepHop(size, c, true, true, true, 0.0, z, dt).drive);
+        ASSERT_TRUE(!stepHop(size, c, flying, dt).drive);
         ASSERT_TRUE(c.phase == HopPhase::Flight);
     }
     ASSERT_EQ(c.thrown, 1);
@@ -262,20 +272,22 @@ void test_a_throw_is_refused_while_the_ball_is_fast_or_the_loop_is_on_its_stops(
     double z = 0.2;
 
     HopCycle fast;
-    const HopDemand a =
-        stepHop(size, fast, true, false, true, size.max_ball_speed * 1.01, z, dt);
-    ASSERT_TRUE(!a.drive);
+    HopFrame rushing = ready(z);
+    rushing.ball_speed = size.max_ball_speed * 1.01;
+    ASSERT_TRUE(!stepHop(size, fast, rushing, dt).drive);
     ASSERT_TRUE(fast.phase == HopPhase::Waiting);
 
     HopCycle pinned;
-    const HopDemand b = stepHop(size, pinned, true, false, /*room=*/false, 0.0, z, dt);
-    ASSERT_TRUE(!b.drive);
+    HopFrame on_the_stops = ready(z);
+    on_the_stops.loop_has_room = false;
+    ASSERT_TRUE(!stepHop(size, pinned, on_the_stops, dt).drive);
     ASSERT_TRUE(pinned.phase == HopPhase::Waiting);
 
     // Just under the speed gate it arms.
     HopCycle ok;
-    ASSERT_TRUE(stepHop(size, ok, true, false, true,
-                        size.max_ball_speed * 0.99, z, dt).drive);
+    HopFrame just_slow = ready(z);
+    just_slow.ball_speed = size.max_ball_speed * 0.99;
+    ASSERT_TRUE(stepHop(size, ok, just_slow, dt).drive);
 
     // And a hop already charging is carried through to its throw: a plate left
     // low is worse than a plate that finished what it started.
@@ -283,23 +295,15 @@ void test_a_throw_is_refused_while_the_ball_is_fast_or_the_loop_is_on_its_stops(
     double zb = 0.2;
     for (int k = 0; k < 3; ++k) run(size, busy, zb, dt);
     ASSERT_TRUE(busy.phase == HopPhase::Charge);
-    ASSERT_TRUE(stepHop(size, busy, true, false, false, 10.0, zb, dt).drive);
+    HopFrame both_gates_shut = ready(zb);
+    both_gates_shut.loop_has_room = false;
+    both_gates_shut.ball_speed = 10.0;
+    ASSERT_TRUE(stepHop(size, busy, both_gates_shut, dt).drive);
 }
 
 // ---------------------------------------------------------------------------
 // Layer 1b: one heave actuator, two signs
 // ---------------------------------------------------------------------------
-
-/// A plate at home with its legs being driven at a chosen rate, assembled the
-/// way `stepSim` assembles one.  The same helper `test_auto_balance` uses.
-PlateMotion movingPlate(const TableKinematics& tk, const TablePose& pose,
-                        const std::array<double, 3>& alpha,
-                        const std::array<double, 3>& cmd, double tau) {
-    const std::array<double, 3> rate =
-        servoRate(alpha, cmd, tau, tk.params().alpha_rate_max);
-    return plateMotion(tk, pose, alpha, rate,
-                       servoAccel(rate, tau, tk.params().alpha_rate_max));
-}
 
 // **The whole of #34's claim to be #23's second half.**  `holdContactDown`
 // drives `p` to zero and the throw drives it positive, and it is the same
@@ -339,6 +343,50 @@ void test_the_heave_solve_hits_its_target_at_either_sign() {
     const std::array<double, 3> aimed =
         heaveToContactRate(tk, d, before, alpha, cmd, s, 0.0);
     for (int i = 0; i < 3; ++i) ASSERT_EQ(held[i], aimed[i]);
+}
+
+// **"All three legs down together, then up" is a claim, so it is checked.**
+// The correction is `J_v^-1 (0, 0, dz)` rather than a uniform `(1, 1, 1)` —
+// that is what leaves the tilt alone away from the symmetric pose — so the
+// three increments are not equal.  What they are is the SAME SIGN and the same
+// order of magnitude, which is what the words mean and what the panel tells a
+// visitor to look for.  A correction that sent one leg the other way would
+// still produce pure heave on paper and would not be a common-mode stroke.
+void test_a_throw_moves_all_three_legs_the_same_way() {
+    const auto models = getBuiltinModels();
+    const TableParams tp = cascadeMechanism(cascadeModel(models).params);
+    const TableKinematics tk(tp);
+    const std::array<double, 3> alpha = {kHome + 0.02, kHome - 0.03, kHome + 0.01};
+    const FKResult fk = tk.solve_pose(alpha, tk.home_pose(kHome));
+    ASSERT_TRUE(fk.converged);
+
+    AutoBalanceDesign d;
+    d.home_leg_rad = kHome;
+    d.servo_tau = 0.05;
+    d.mechanism = tp;
+
+    // A tracking command with a tilt in it, from an off-centre pose, so the
+    // heave and the tilt are genuinely mixed in the triple.
+    const std::array<double, 3> cmd = {kHome + 0.06, kHome - 0.01, kHome + 0.03};
+    const PlateMotion plate = movingPlate(tk, fk.pose, alpha, cmd, d.servo_tau);
+    const Eigen::Vector3d s(0.04, -0.06, kBallRadius);
+    const double rest = commandedContactRate(tk, d, plate, alpha, cmd, s);
+
+    for (double target : {rest - 0.40, rest + 0.40}) {
+        const std::array<double, 3> aimed =
+            heaveToContactRate(tk, d, plate, alpha, cmd, s, target);
+        const double want = (target > rest) ? 1.0 : -1.0;
+        double smallest = 1e9, largest = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            const double step = aimed[i] - cmd[i];
+            ASSERT_TRUE(step * want > 0.0);        // all three, the same way
+            smallest = std::min(smallest, std::abs(step));
+            largest = std::max(largest, std::abs(step));
+        }
+        // ...and together rather than one leg doing the work: the spread is
+        // the plate's geometry, not a tilt smuggled in as heave.
+        ASSERT_TRUE(largest < 2.0 * smallest);
+    }
 }
 
 // The refusals are the constraint's, unchanged: no lag means no map from a
@@ -382,8 +430,7 @@ struct Hop {
     double max_radius = 0.0;                ///< [m] furthest the ball got out
     double apex = 0.0;                      ///< [m] highest above the surface
     double worst_rise = 0.0;                ///< [m/s] `p` in flight; #23's bound
-    double lowest_z = 0.0, highest_z = 0.0; ///< [m] the heave the hop spent
-    double slowest_rebound = 1e9;           ///< [m/s] against the bounce floor
+    double lowest_z = 0.0;                  ///< [m] the heave the hop spent
     int airborne = 0, frames = 0, thrown = 0;
     int impacts_at_release = 0;             ///< throws that let go ON an impact
     double weakest_release = 1e9;           ///< [m/s] rebound at a release impact
@@ -407,7 +454,7 @@ Hop follow(const ModelEntry& e, const Eigen::MatrixXd& K,
                           Eigen::Vector4d(start(0), start(1), 0.0, 0.0));
 
     Hop r;
-    r.lowest_z = r.highest_z = s.pose.z_c;
+    r.lowest_z = s.pose.z_c;
     double t = 0.0, sum = 0.0;
     int n = 0, thrown_before = 0;
     bool was_airborne = false;
@@ -421,7 +468,6 @@ Hop follow(const ModelEntry& e, const Eigen::MatrixXd& K,
         r.max_radius = std::max(r.max_radius,
                                 std::hypot(f.ball_plate(0), f.ball_plate(1)));
         r.lowest_z = std::min(r.lowest_z, s.pose.z_c);
-        r.highest_z = std::max(r.highest_z, s.pose.z_c);
         if (f.airborne) ++r.airborne;
         // `p` is only a constraint on a frame the ball ENTERED airborne — the
         // frame a separation happens on is one where the ball was on the plate
@@ -430,20 +476,17 @@ Hop follow(const ModelEntry& e, const Eigen::MatrixXd& K,
             r.worst_rise = std::max(r.worst_rise, f.contact_normal_rate);
         // The frame a throw let go on.  A commanded hop is a SEPARATION, so the
         // bounce law — and with it the bounce floor — is not consulted there.
-        if (!was_airborne && f.airborne && s.hop.thrown > thrown_before) {
+        if (!was_airborne && f.airborne && f.hops_thrown > thrown_before) {
             if (f.impact_approach != 0.0) {
                 ++r.impacts_at_release;
                 r.weakest_release = std::min(
                     r.weakest_release, -kRestitution * f.impact_approach);
             }
-            thrown_before = s.hop.thrown;
+            thrown_before = f.hops_thrown;
         }
-        // The rebounds of the train a throw starts, which the floor CAN end.
-        if (f.impact_approach < 0.0)
-            r.slowest_rebound =
-                std::min(r.slowest_rebound, -kRestitution * f.impact_approach);
         was_airborne = f.airborne;
 
+        r.thrown = f.hops_thrown;
         if (f.left_plate) r.lost = true;
         if (!onBuiltAssembly(plate.kinematics(), s.alpha_rad, s.pose))
             r.changed_assembly = true;
@@ -456,7 +499,6 @@ Hop follow(const ModelEntry& e, const Eigen::MatrixXd& K,
         }
     }
     r.mean_err = n ? sum / n : 0.0;
-    r.thrown = s.hop.thrown;
     return r;
 }
 
@@ -518,8 +560,7 @@ void test_the_hop_spends_a_stated_amount_of_tilt_authority() {
     const TableKinematics& tk = plate.kinematics();
     const double g = plate.gravity();
     const double home_z = tk.home_pose(cascadeHomeLegAngle(e.params)).z_c;
-    const HopSizing size = hopSizing(g, cascadeServoTau(e.params),
-                                     tk.params().R_table - SimPlate::ballRadius());
+    const HopSizing size = plate.hopSizing(cascadeServoTau(e.params));
 
     auto accelAt = [&](double z) {
         return RollingBallDynamics::rolling_factor() * g *
@@ -584,8 +625,7 @@ void test_the_bounce_floor_cannot_end_a_commanded_hop() {
     const SimPlate plate = cascadePlate(e.params);
     const double g = plate.gravity();
     const double tau = cascadeServoTau(e.params);
-    const HopSizing size = hopSizing(g, tau,
-                                     plate.params().R_table - SimPlate::ballRadius());
+    const HopSizing size = plate.hopSizing(tau);
 
     double previous_ratio = 0.0;
     for (double hz : {60.0, 120.0, 240.0}) {
@@ -608,11 +648,12 @@ void test_the_bounce_floor_cannot_end_a_commanded_hop() {
         const Hop r = follow(e, defaultGain(e), openingCircle(), true, 30.0, dt);
         ASSERT_TRUE(r.thrown >= 6);
 
-        // Every throw let go on a separation rather than on an impact, so the
-        // floor was never asked about a commanded hop.
-        // Every throw let go, and the rebound the floor was asked about
+        // A throw DOES resolve an impact on the frame it lets go — the plate
+        // is still climbing the ramp and runs into the ball it just released —
+        // so the floor is asked about every hop this controller commands.  It
         // cleared it at every frame rate.
-        ASSERT_TRUE(r.weakest_release < 1e8);   // a release impact was seen
+        ASSERT_TRUE(r.impacts_at_release > 0);
+        ASSERT_TRUE(r.weakest_release < 1e8);   // so a release impact was seen
         ASSERT_TRUE(r.weakest_release > 1.15 * floor);
         // ...and by a factor that does NOT improve with the frame rate, which
         // is the point.  `e (1 + margin)` is 2.4 and the yielding takes it to
@@ -652,12 +693,22 @@ void test_a_commanded_hop_does_not_pump_its_own_train() {
 
 // **The ball is never lost at any setting the sliders offer**, which is the
 // same promise `test_trajectory` makes for tracking and the one thing a demo
-// control may not break.
+// control may not break.  And **the ball still follows the path while hopping,
+// to a tracking error measured at every one of them** — #23 asked for a stated
+// error and a number that lives only in prose is the failure the decision
+// record's D15 names.
 //
 // Nine of the eighteen never hop, and that is the feature working: a ball
-// crossing the plate faster than `max_ball_speed` is one whose flight would
-// not come down on the plate, so the throw is refused and the tracking is
-// exactly what it was.  See `stepHop`.
+// crossing the plate faster than `max_ball_speed` is one whose flight would not
+// come down on the plate, so the throw is refused and the tracking is exactly
+// what it was.  See `stepHop`.
+//
+// **The cornered shapes are in scope**, and this is where that is decided: the
+// square and the triangle hop at their slow laps exactly as the circle does,
+// and are refused at their fast ones exactly as the circle is.  The fillet
+// (#31) is what makes that true — a reference with a step in its velocity at
+// every corner would have the loop against its stops there, which is the second
+// gate.
 void test_no_offered_setting_loses_the_ball_to_a_hop() {
     const auto models = getBuiltinModels();
     const ModelEntry& e = cascadeModel(models);
@@ -666,6 +717,8 @@ void test_no_offered_setting_loses_the_ball_to_a_hop() {
 
     int hopped = 0, refused = 0;
     double worst_apex = 0.0, worst_rise = 0.0;
+    double worst_hopping_error = 0.0, best_hopping_error = 1.0;
+    double worst_cost = -1.0;   ///< the most a hop added to the tracking error
     for (PathShape shape : {PathShape::Circle, PathShape::Square, PathShape::Triangle}) {
         for (double radius : {0.06, 0.12, 0.18}) {
             for (int fast = 0; fast < 2; ++fast) {
@@ -674,20 +727,112 @@ void test_no_offered_setting_loses_the_ball_to_a_hop() {
                 q.radius_m = radius;
                 q.period_s = fast ? clampPeriod(plate.feasible(q), 0.0) : 30.0;
 
-                const Hop r = follow(e, K, q, true, 3.0 * q.period_s + 20.0);
+                const double seconds = 3.0 * q.period_s + 20.0;
+                const Hop flat = follow(e, K, q, false, seconds);
+                const Hop r = follow(e, K, q, true, seconds);
                 ASSERT_TRUE(!r.lost);
                 ASSERT_TRUE(!r.changed_assembly);
-                if (r.thrown > 0) ++hopped; else ++refused;
+
+                if (r.thrown == 0) {
+                    ++refused;
+                    // A refused hop is not a degraded one: the command is
+                    // untouched, so the tracking is the same run.
+                    ASSERT_NEAR(r.mean_err, flat.mean_err, 1e-12);
+                    continue;
+                }
+                ++hopped;
                 worst_apex = std::max(worst_apex, r.apex);
                 worst_rise = std::max(worst_rise, r.worst_rise);
+                worst_hopping_error = std::max(worst_hopping_error, r.mean_err);
+                best_hopping_error = std::min(best_hopping_error, r.mean_err);
+                worst_cost = std::max(worst_cost, r.mean_err - flat.mean_err);
             }
         }
     }
     ASSERT_EQ(hopped, 9);
     ASSERT_EQ(refused, 9);
+
     // The hop is the same size wherever it happens, and never pumps.
     ASSERT_TRUE(worst_apex < 0.030);
     ASSERT_TRUE(worst_rise < 0.005);
+
+    // **The stated tracking error, over every setting that hops**: 1.8 to
+    // 3.9 mm, against 3.7 to 4.5 mm for the same nine runs without the hop.
+    // Hopping costs nothing measurable here and on most of them it is better —
+    // the tilt is untouched by construction, and `predictedLanding` aiming the
+    // plate at where the ball will come down cancels a lag the rolling loop
+    // integrates.  The bound below is on the COST rather than on the error, so
+    // a path that is simply hard to track cannot be mistaken for a hop that
+    // made it harder.
+    ASSERT_TRUE(best_hopping_error > 0.0015);
+    ASSERT_TRUE(worst_hopping_error < 0.0040);
+    ASSERT_TRUE(worst_cost < 0.0005);
+}
+
+// **The disturbances are live alongside the hop**, and the two together are
+// what a visitor will actually do: tick the box, then shove the ball.  The
+// sweep above is undisturbed laps, so on its own it says nothing about that.
+//
+// `kMaxNudgeSpeed` is the hardest shove the interface offers, and #23 measured
+// it separating the ball on about one run in nine of a lap-by-direction grid
+// with no hop at all.  With the hop on, the shove and the throw can land
+// together — and they must still not lose the ball.
+void test_a_shove_during_a_hop_still_keeps_the_ball() {
+    const auto models = getBuiltinModels();
+    const ModelEntry& e = cascadeModel(models);
+    const SimPlate plate = cascadePlate(e.params);
+    const Eigen::MatrixXd K = defaultGain(e);
+
+    SimInput in;
+    in.design = cascadeDesign(e.params);
+    in.design.K = K;
+    in.path = plate.feasible(openingCircle());
+    in.hop_enabled = true;
+
+    int shoves = 0, lost = 0, assembly = 0, hopped = 0;
+    double worst_radius = 0.0;
+    // Eight points of the lap crossed with eight directions, the shove timed
+    // to fall at a different point of the hop cycle each round.
+    for (int lap_point = 0; lap_point < 8; ++lap_point) {
+        for (int dir = 0; dir < 8; ++dir) {
+            const Eigen::Vector2d start = pathPoint(in.path, 0.0);
+            SimState s = simStart(plate, in.design.home_leg_rad,
+                                  Eigen::Vector4d(start(0), start(1), 0.0, 0.0));
+            const double shove_at =
+                in.path.period_s * (1.0 + lap_point / 8.0) + dir * in.dt;
+            const double theta = dir * 2.0 * M_PI / 8.0;
+
+            bool shoved = false;
+            double t = 0.0;
+            for (int k = 0; k < static_cast<int>(35.0 / in.dt); ++k) {
+                if (!shoved && t >= shove_at && !s.ball.airborne) {
+                    s.ball.rolling(2) += kMaxNudgeSpeed * std::cos(theta);
+                    s.ball.rolling(3) += kMaxNudgeSpeed * std::sin(theta);
+                    shoved = true;
+                    ++shoves;
+                }
+                const SimReport f = stepSim(plate, in, s);
+                t += in.dt;
+                worst_radius = std::max(
+                    worst_radius, std::hypot(f.ball_plate(0), f.ball_plate(1)));
+                if (f.left_plate) { ++lost; break; }
+                if (!onBuiltAssembly(plate.kinematics(), s.alpha_rad, s.pose))
+                    ++assembly;
+            }
+            if (s.hop.thrown > 0) ++hopped;
+        }
+    }
+
+    ASSERT_EQ(shoves, 64);
+    // Measured: none of the 64 loses the ball, none changes assembly, every
+    // one of them hops, and the ball reaches 164 mm against a 280 mm rim.  The
+    // shove is what takes it out there — 120 mm of path plus a 0.20 m/s kick —
+    // and a shove arriving while the ball is being thrown or is mid-train is
+    // the interaction the undisturbed sweep cannot reach at all.
+    ASSERT_EQ(lost, 0);
+    ASSERT_EQ(assembly, 0);
+    ASSERT_TRUE(worst_radius < 0.18);
+    ASSERT_EQ(hopped, 64);
 }
 
 }  // namespace
@@ -704,6 +849,7 @@ int main() {
     test_a_throw_is_refused_while_the_ball_is_fast_or_the_loop_is_on_its_stops();
 
     test_the_heave_solve_hits_its_target_at_either_sign();
+    test_a_throw_moves_all_three_legs_the_same_way();
     test_the_heave_solve_declines_what_the_constraint_declines();
 
     test_the_plate_hops_the_ball_while_it_tracks();
@@ -711,6 +857,7 @@ int main() {
     test_the_bounce_floor_cannot_end_a_commanded_hop();
     test_a_commanded_hop_does_not_pump_its_own_train();
     test_no_offered_setting_loses_the_ball_to_a_hop();
+    test_a_shove_during_a_hop_still_keeps_the_ball();
 
     std::printf("test_hop_drive: all passed\n");
     return 0;

@@ -1259,6 +1259,13 @@ turns from a carry into a strike, the `(1 + e)` term triples the hop and the
 constraint starts being given up; at 3.0 the ball is thrown off the plate.  1.5
 sits below the step with the whole of it in hand.
 
+**The cornered shapes are in scope, and they are in scope for #31's reason.**
+The square and the triangle hop at their slow laps exactly as the circle does
+and are refused at their fast ones exactly as the circle is, so nothing about a
+corner needed deciding separately — the fillet already removed the step in the
+reference velocity that would have had the loop against its stops there, which
+is the second gate below.
+
 **What stops it throwing the ball off the plate** — #23's own open question
 about this feature, and the failure mode #23 was opened about — is two gates on
 *arming*.  A throw buys two and a half seconds of a ball the plate can only
@@ -1285,8 +1292,12 @@ plate can still be *held* at from down there: `max_conditioned_tilt` goes from
 
 **Tracking is barely touched, and that is not what anyone expected.**  On the
 opening circle, mean error 3.64 mm without the hop and 4.02 mm with it; over
-the nine settings that do hop, hopping tracks *better* than not hopping on
-every one of them (1.84–3.82 mm against 3.68–4.45 mm).  The tilt authority is
+the nine settings that do hop, 1.8 to 3.9 mm against 3.7 to 4.5 mm for the same
+nine runs without it — so hopping costs nothing measurable and on most of them
+it is better.  Asserted rather than reported: `test_hop_drive` bounds the
+*cost*, `mean_err` with the hop minus `mean_err` without it on the same
+setting, so a path that is simply hard to track cannot be mistaken for a hop
+that made it harder.  The tilt authority is
 untouched by construction and what a hop costs is contact time, and the loop
 turns out not to need the contact it loses: `predictedLanding` aims the plate
 at the landing point through the flight, and a ball that is arriving at a
@@ -1305,6 +1316,14 @@ shrinks**: the plate gains `margin·g·dt/2` of rise a frame and the ball falls
 `g·dt/2` against it, so the ratio is about `e(1 + margin)` and `dt` cancels.
 Moving the floor to `g·dt` stops the controller hopping at all, which is where
 the edge was found rather than argued for.
+
+**The disturbances are live alongside it**, which the lap sweeps say nothing
+about — they are undisturbed laps, and what a visitor does is tick the box and
+then shove the ball.  Over 8 lap points crossed with 8 shove directions at
+`kMaxNudgeSpeed`, the hardest the interface offers: **64 of 64 keep the ball,
+none changes assembly, every one of them still hops, and the ball reaches
+164 mm against a 280 mm rim.**  A shove arriving while the ball is being thrown
+or is mid-train is the case that grid exists for.
 
 **It needs a frame rate that can resolve the stroke, and fails safe when it
 does not.**  Below about 45 Hz the ramp crosses `g·τ` in too few frames and the
