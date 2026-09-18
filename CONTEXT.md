@@ -1258,6 +1258,41 @@ The pure function is what makes that possible.  Measured, the loop cannot raise
 entry 1 at anything the Nudge buttons compose, so a test that drove only the
 demo would leave the top of the precedence unpinned and nothing would say so.
 
+#### What the named cause is worth, measured after the fact
+
+**Under the closed loop it names the same thing every time.**  Measured across
+three tunings and shove speeds from 1.20 to 5.00 m/s — 1,080 losses, 72
+directions apiece — every one carried the identical flags, `clipped` and
+`saturated`, so every one is reported as `workspace-clipped`.  No reordering of
+the precedence could improve on that, because the input does not vary, and
+moving the anchor earlier does not either: `clipped` is already up by the time
+the ball is 75 mm out.
+
+The cause is mechanical.  `clipped` means the gain asked for a pose the
+mechanism will not hold, and a ball far off centre is a large error, so it is
+raised continuously through any large excursion.  It is a *the loop is working
+hard* signal rather than a fault signal, and second in the precedence it masks
+`separated` and `saturated` permanently.
+
+So what the banner actually discriminates is **who was driving** — the loop
+always reports `workspace-clipped`, the servo sliders report `separated` or
+`rolled off` — which a visitor who reached for the sliders already knows.  The
+parts that carry their weight are the pause, the marker and the hand-driven
+cases; the named cause under the loop does not.
+
+This is pinned by `test_the_closed_loop_reports_one_constant_cause_today`, which
+is a characterisation test rather than a specification: the day it fails is the
+day the diagnosis started discriminating, and this section should be rewritten
+rather than the test relaxed.
+
+**What a discriminating diagnosis would need** is a different signal, not a
+different order.  The candidates, in increasing cost: give `clipped` a magnitude
+threshold so it means *refused by a large margin*; or diagnose the recovery
+rather than the frame, comparing what the loop did against what the plant could
+have done, so it can separate "this shove was beyond any tuning" from "this
+tuning ran out of authority where another would not have".  The second is what
+D14 was reaching for and is a larger feature than #33 described.
+
 #### Where the evidence goes, and why not behind a hover
 
 The banner is a label and the plot annotation is a label plus the raw flags; the

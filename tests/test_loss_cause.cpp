@@ -313,6 +313,84 @@ void test_the_two_scarce_causes_are_reachable_above_the_offered_envelope() {
     ASSERT_TRUE(untrusted_frames > 0);
 }
 
+// --- What this rule CANNOT do, pinned so that fixing it is noticed ---
+
+// **Under the closed loop the precedence names the same cause every time, and
+// this test exists to say so out loud.**
+//
+// Measured after the rule shipped: across three tunings and shove speeds from
+// 1.20 to 5.00 m/s, 1,080 losses over 72 directions apiece, every single one
+// carried the identical flag combination — `clipped` and `saturated`, with
+// `rates_untrustworthy` and `separated` clear.  So `lossCause` returns
+// `WorkspaceClipped` for all of them, and NO reordering of the precedence could
+// do better, because the input does not vary.  Moving the anchor earlier does
+// not help either: `clipped` is already raised by the time the ball is 75 mm
+// out, which is a quarter of the way to the rim.
+//
+// The reason is mechanical rather than incidental.  `clipped` means the gain
+// asked for a pose the mechanism will not hold, and a ball far off centre is a
+// large error, so a large error is a command that cannot be held — continuously,
+// for the whole excursion.  It is a "the loop is working hard" signal, not a
+// fault signal, and sitting second in the precedence it masks `separated` and
+// `saturated` permanently.
+//
+// So the banner's real information content under the loop is nil.  What it
+// still discriminates is who was DRIVING — the hand-driven cases above reach
+// `separated` and `rolled off` — which the visitor already knows.
+//
+// **This is a characterisation test, not a specification.**  It pins a
+// limitation rather than a requirement, and the day it FAILS is the day
+// somebody made the diagnosis discriminate, which is the wanted change.  When
+// that happens: do not relax this test, delete it, and correct CONTEXT.md's
+// "Losing the ball, and saying so" along with the banner's claim.
+//
+// See the discussion on
+// [#33](https://github.com/caliburn-engineering/caliburn/issues/33).
+void test_the_closed_loop_reports_one_constant_cause_today() {
+    const auto models = getBuiltinModels();
+    const ModelEntry& e = cascadeModel(models);
+    const SimPlate plate = cascadePlate(e.params);
+
+    int losses = 0;
+    for (const char* preset : {"Detuned", "Nominal", "Aggressive"}) {
+        for (double kick : {1.30, 2.00, 5.00}) {
+            SimInput in;
+            in.design = cascadeDesign(e.params);
+            in.design.K = gainForPreset(e, presetNamed(preset));
+
+            const int kDirections = 24;
+            for (int d = 0; d < kDirections; ++d) {
+                const double theta = 2.0 * M_PI * d / kDirections;
+                SimState s = simStart(plate, in.design.home_leg_rad,
+                                      Eigen::Vector4d(0.06, -0.04, 0.0, 0.0));
+                const int settle = static_cast<int>(2.5 / in.dt);
+                const int total = settle + static_cast<int>(12.0 / in.dt);
+                for (int k = 0; k < total; ++k) {
+                    if (k == settle && !s.ball.airborne) {
+                        s.ball.rolling(2) += kick * std::cos(theta);
+                        s.ball.rolling(3) += kick * std::sin(theta);
+                    }
+                    const SimReport f = stepSim(plate, in, s);
+                    if (!f.left_plate) continue;
+
+                    ++losses;
+                    const LossFlags fl = lossFlags(f, s);
+                    ASSERT_TRUE(fl.clipped);
+                    ASSERT_TRUE(fl.saturated);
+                    ASSERT_TRUE(!fl.rates_untrustworthy);
+                    ASSERT_TRUE(!fl.separated);
+                    ASSERT_TRUE(lossCause(fl) == LossCause::WorkspaceClipped);
+                    break;
+                }
+            }
+        }
+    }
+    // Every combination lost the ball, which is itself part of the claim: there
+    // is no closed-loop loss in this range that reports anything else, because
+    // there is no closed-loop loss in this range that got away.
+    ASSERT_EQ(losses, 3 * 3 * 24);
+}
+
 // --- The hand-driven paths, which are what the banner is now mostly for ---
 
 // The legs dragged apart with the ball already running: the plate drops away
@@ -406,6 +484,7 @@ int main() {
     test_a_loss_under_the_loop_is_named_workspace_clipped();
     test_the_offered_envelope_does_not_lose_the_ball();
     test_the_two_scarce_causes_are_reachable_above_the_offered_envelope();
+    test_the_closed_loop_reports_one_constant_cause_today();
     test_a_ball_thrown_off_by_hand_is_named_separated();
     test_a_ball_tilted_off_by_hand_is_named_rolled_off();
     std::printf("test_loss_cause: all passed\n");
