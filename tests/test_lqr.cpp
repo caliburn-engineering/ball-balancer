@@ -419,6 +419,33 @@ void test_rejects_indefinite_q() {
     ASSERT_TRUE(!r.success);
 }
 
+// A stabilizable-but-not-controllable plant: the uncontrollable mode is
+// stable at -2, so it decays on its own.  The CARE has a solution and the
+// solver must accept it.
+void test_accepts_stabilizable_but_uncontrollable_plant() {
+    // state 0: x0' = -x0 + u  (controllable, stable at -1)
+    // state 1: x1' = -2*x1    (uncontrollable, stable at -2)
+    LinearSystem sys;
+    sys.A = Eigen::MatrixXd::Zero(2, 2);
+    sys.A(0, 0) = -1.0;
+    sys.A(1, 1) = -2.0;
+    sys.B = Eigen::MatrixXd::Zero(2, 1);
+    sys.B(0, 0) = 1.0;
+    sys.C = eye(2);
+    sys.D = Eigen::MatrixXd::Zero(2, 1);
+
+    // Zero weight on the uncontrollable state keeps the cost integral finite.
+    Eigen::MatrixXd Q = eye(2);
+    Q(1, 1) = 0.0;
+
+    const LqrResult r = computeLQR(sys, Q, eye(1));
+    ASSERT_TRUE(r.success);
+    ASSERT_TRUE(r.error.empty());
+    ASSERT_EQ(r.K.rows(), 1);
+    ASSERT_EQ(r.K.cols(), 2);
+    for (const cd& p : r.closed_loop_poles) ASSERT_TRUE(p.real() < 0.0);
+}
+
 // An uncontrollable, unstabilizable plant has no finite-cost solution.  The
 // second state is disconnected from the input and unstable, so no gain can
 // move it.
@@ -461,6 +488,7 @@ int main() {
     test_residual_below_machine_precision_r_heavy();
     test_residual_below_machine_precision_ball_plate();
     test_pre_refinement_residual_on_cascade_plant();
+    test_accepts_stabilizable_but_uncontrollable_plant();
     test_rejects_non_positive_definite_r();
     test_rejects_negative_r();
     test_rejects_wrong_sized_q();
