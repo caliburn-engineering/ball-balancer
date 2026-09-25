@@ -229,6 +229,21 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(test_attract_mode PRIVATE ball_dynamics)
     target_include_directories(test_attract_mode PRIVATE tests)
     add_test(NAME test_attract_mode COMMAND test_attract_mode)
+
+    add_executable(test_oracle_fixtures tests/test_oracle_fixtures.cpp)
+    target_link_libraries(test_oracle_fixtures PRIVATE ball_dynamics)
+    target_include_directories(test_oracle_fixtures PRIVATE tests)
+    add_test(NAME test_oracle_fixtures COMMAND test_oracle_fixtures)
+endif()
+
+# --- Oracle exporter (desktop only, no GL needed) ---
+# Runs the preset plants through the cascade model and emits A, B, Q, R as JSON
+# so the Python oracle generator can solve CARE independently:
+#   cmake --build build --target export_plants
+#   ./build/export_plants | python3 tools/gen_oracle_fixtures.py - > tests/oracle_fixture.h
+if(NOT EMSCRIPTEN)
+    add_executable(export_plants tools/export_plants.cpp)
+    target_link_libraries(export_plants PRIVATE ball_dynamics)
 endif()
 
 # --- Visualizer executable ---
