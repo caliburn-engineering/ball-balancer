@@ -1,0 +1,125 @@
+// tests/test_oracle_fixtures.cpp
+//
+// Compares computeLQR against the pre-generated oracle fixture constants in
+// oracle_fixture.h.  The oracle was produced by an independent solver
+// (scipy.linalg.solve_continuous_are or a pure-Python sign-function
+// fallback); any bug in the C++ Hamiltonian formation or the sign-function
+// recovery that the solver tests do not already catch will show here as a
+// gain mismatch.
+//
+// The test is a property test, not an oracle-consistency test: it asserts that
+// our solver's CARE residual is below the design threshold and that the gain
+// agrees with the oracle to 1e-4 in the Frobenius norm.  1e-4 is deliberately
+// loose — the oracle and the C++ solver use different algorithms, so some
+// floating-point divergence is expected; a larger gap is a genuine
+// disagreement.
+//
+// Running the oracle generator:
+//   cmake --build build --target export_plants
+//   ./build/export_plants | python3 tools/gen_oracle_fixtures.py - > tests/oracle_fixture.h
+
+#include "analysis/lqr.h"
+#include "analysis/model_library.h"
+#include "auto_balance.h"
+#include "oracle_fixture.h"
+#include "test_helpers.h"
+
+#include <Eigen/Core>
+#include <cstdio>
+#include <vector>
+
+using namespace caliburn;
+
+namespace {
+
+constexpr double kGainTol    = 1e-4;   // max Frobenius distance oracle vs computed
+constexpr double kResTol     = 1e-8;   // CARE residual bound, same as test_lqr.cpp
+
+double riccatiResidual(const LinearSystem& sys,
+                       const Eigen::MatrixXd& Q,
+                       const Eigen::MatrixXd& R,
+                       const Eigen::MatrixXd& P) {
+    const Eigen::MatrixXd res =
+        sys.A.transpose() * P + P * sys.A
+        - P * sys.B * R.inverse() * sys.B.transpose() * P + Q;
+    return res.norm();
+}
+
+void checkPreset(const char* label,
+                 const LinearSystem& sys,
+                 const LqrPreset& preset,
+                 const Eigen::MatrixXd& oracle_K,
+                 const Eigen::MatrixXd& oracle_P) {
+    const int n = sys.states();
+    const int m = sys.inputs();
+
+    const Eigen::MatrixXd Q = presetStateWeights(preset, n).asDiagonal().toDenseMatrix();
+    const Eigen::MatrixXd R = presetInputWeights(preset, m).asDiagonal().toDenseMatrix();
+
+    const LqrResult res = computeLQR(sys, Q, R);
+    ASSERT_TRUE(res.success);
+
+    // Riccati residual: the solver must satisfy the equation it claims to solve.
+    const double residual = riccatiResidual(sys, Q, R, res.P);
+    if (residual >= kResTol) {
+        std::fprintf(stderr, "FAIL [%s]: Riccati residual %.3e >= %.3e\n",
+                     label, residual, kResTol);
+        std::exit(1);
+    }
+
+    // Gain agreement: the oracle K and the computed K must be close.
+    const double gain_dist = (res.K - oracle_K).norm();
+    if (gain_dist >= kGainTol) {
+        std::fprintf(stderr,
+            "FAIL [%s]: K differs from oracle by %.3e (tolerance %.3e)\n"
+            "  oracle K norm   : %.6g\n"
+            "  computed K norm : %.6g\n",
+            label, gain_dist, kGainTol,
+            oracle_K.norm(), res.K.norm());
+        std::exit(1);
+    }
+
+    // Riccati solution agreement.
+    const double P_dist = (res.P - oracle_P).norm();
+    if (P_dist >= kGainTol) {
+        std::fprintf(stderr,
+            "FAIL [%s]: P differs from oracle by %.3e (tolerance %.3e)\n",
+            label, P_dist, kGainTol);
+        std::exit(1);
+    }
+
+    std::printf("  [%s] residual=%.2e  dK=%.2e  dP=%.2e  OK\n",
+                label, residual, gain_dist, P_dist);
+}
+
+}  // namespace
+
+int main() {
+    const std::vector<ModelEntry> models = getBuiltinModels();
+    const ModelEntry* cascade = nullptr;
+    for (const auto& m : models)
+        if (isCascadeModel(m)) { cascade = &m; break; }
+    if (!cascade) {
+        std::fprintf(stderr, "FAIL: no cascade model in the library\n");
+        return 1;
+    }
+
+    std::printf("Oracle fixture comparison (cascade LQR presets):\n");
+    checkPreset("Detuned",    cascade->system,
+                lqrPresets()[0],
+                oracle::oracle_K_cascade_detuned(),
+                oracle::oracle_P_cascade_detuned());
+
+    checkPreset("Nominal",    cascade->system,
+                lqrPresets()[1],
+                oracle::oracle_K_cascade_nominal(),
+                oracle::oracle_P_cascade_nominal());
+
+    checkPreset("Aggressive", cascade->system,
+                lqrPresets()[2],
+                oracle::oracle_K_cascade_aggressive(),
+                oracle::oracle_P_cascade_aggressive());
+
+    std::printf("All oracle fixture tests passed.\n");
+    return 0;
+}
