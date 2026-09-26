@@ -553,4 +553,39 @@ Eigen::VectorXd presetInputWeights(const LqrPreset& p, int m);
 /// which no vector length can tell it.
 int activePreset(const Eigen::VectorXd& q, const Eigen::VectorXd& r);
 
+// --- Engagement state -------------------------------------------------------
+
+/// Why the balance loop was last disengaged.
+///
+/// `None`: the loop is running, or has never been engaged.
+/// `Transient`: the design became unavailable (failed solve, wrong controller);
+///   the loop re-engages automatically when a usable design is next offered.
+/// `Deliberate`: the visitor unchecked Engage; the loop stays dropped until
+///   they say otherwise.
+enum class LossKind { None, Transient, Deliberate };
+
+/// Engagement state of the balance loop — the two flags `PlateView` tracks.
+///
+/// `engaged` is the flag `loopDriving` reads.  `auto_engaged` is the one-shot
+/// latch that keeps the opening auto-engage from firing a second time after the
+/// visitor has deliberately dropped the loop.
+struct Engage {
+    bool engaged     = false;
+    bool auto_engaged = false;
+};
+
+/// Compute the next engagement state from the current one and its context.
+///
+/// Three transitions, in order:
+///
+/// 1. **Drop** if `!usable`: a stale gain is not a controller.
+/// 2. **Re-engage** after a `Transient` loss once `usable` is true again.
+///    Recovers from an LQR solve that temporarily failed and then succeeded.
+/// 3. **Auto-engage** once on the first usable frame (`!prev.auto_engaged`).
+///    This is the opening engage that the visitor has not been asked about yet.
+///
+/// `ball_on` gates rules 2 and 3: the loop cannot run without a ball.
+/// A `Deliberate` loss is sticky — only a visitor re-checking Engage clears it.
+Engage nextEngage(Engage prev, bool usable, bool ball_on, LossKind loss);
+
 }  // namespace caliburn

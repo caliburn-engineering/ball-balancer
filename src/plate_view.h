@@ -7,6 +7,7 @@
 #include "ball_sim.h"
 #include "comparison_panel.h"
 #include "loss_cause.h"
+#include "plate_design.h"
 #include "plot_panel.h"
 #include "renderer.h"
 #include "setpoint_path.h"
@@ -66,22 +67,19 @@ public:
 
     /// Hand over the design surface's current answer, once per frame.
     ///
-    /// `offered` is the caller's claim — that LQR is the selected controller,
-    /// that the solve succeeded, and that the plant it was solved against is
-    /// the cascade.  Only the model panel can know any of that.  The plate
-    /// adds the two checks it alone can make, the gain's shape and whether the
-    /// mechanism in `d` is the one being simulated, and states its own reason
-    /// when either fails.
+    /// `offer.offered` is the caller's claim — that LQR is selected, the
+    /// solve succeeded, and the plant is the cascade.  Only the model panel
+    /// can know any of that.  The plate adds the two checks it alone can make:
+    /// the gain's shape and whether the mechanism matches the one it simulates.
     ///
-    /// `d.servo_tau` is honoured whether or not the design is offered: the
-    /// legs have first-order lag in manual driving too, and the model panel's
-    /// tau slider is the one place that number lives.
+    /// `offer.design.servo_tau` is honoured whether or not the design is
+    /// offered: the legs have first-order lag in manual driving too.
     ///
-    /// This is also where the opening closes the loop for the first time —
-    /// see `auto_engaged_`.  Engaging and dropping are the same decision read
-    /// in two directions, and they belong at the same seam.
-    void setDesign(const AutoBalanceDesign& d, bool offered,
-                   const std::string& reason);
+    /// Engagement and dropping both happen here, through `nextEngage`.  The
+    /// one-shot auto-engage for attract mode fires on the first usable design;
+    /// a transient loss (failed solve) re-engages when the design is usable
+    /// again; a deliberate visitor disengagement stays dropped.
+    void setDesign(const Offer& offer);
 
     /// Camera orbiting, for the scroll callback.
     OrbitCamera& camera() { return camera_; }
@@ -170,7 +168,8 @@ private:
     AutoBalanceDesign design_{};
     bool design_offered_ = false;
     std::string design_reason_ = "select LQR as the controller type";
-    bool balance_engaged_ = false;
+    Engage engage_{};
+    LossKind engage_loss_ = LossKind::None;
     bool balance_saturated_ = false;
     bool balance_clipped_ = false;   ///< command was not holdable, pulled back
 
@@ -246,10 +245,6 @@ private:
     // reason.  It is set beside the rest of the app's opening state, in
     // `visualizer.cpp`'s main().
 
-    /// Whether the loop has yet been engaged for the visitor, once, without
-    /// being asked.  A one-shot latch rather than a mode: after it fires the
-    /// checkbox is the visitor's, and a loop they drop stays dropped.
-    bool auto_engaged_ = false;
 
     // --- Ball ---
     // Six states now, in two phases: the plate can lose contact and the ball

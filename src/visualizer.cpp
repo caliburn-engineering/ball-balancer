@@ -26,47 +26,19 @@
 #include "panels/nyquist_panel.h"
 #include "panels/time_response_panel.h"
 
+#include "plate_design.h"
 #include "plate_view.h"
 #include "sim_step.h"
 
-// The design surface's current answer, in the form the plate needs it.
+// Hand the design surface's current answer to the plate.
 //
-// Assembled here rather than inside PlateView because only this side knows
-// which preset is loaded, which controller type is selected and whether the
-// Riccati solve landed.  The plate adds the two checks it alone can make — the
-// gain's shape and whether the plant described here is the one it simulates.
-//
-// The servo lag and the home leg angle are handed over whether or not a gain
-// is on offer: they are properties of the plate, and the model panel's sliders
-// are the one place they live.
+// `designToOffer` assembles the offer from the model panel's state; the plate
+// adds the two checks it alone can make (gain shape, mechanism match) inside
+// `setDesign`.  The servo lag and home angle travel regardless of `offered`.
 static void handDesignToPlate(caliburn::AppState& state,
                               const std::vector<caliburn::ModelEntry>& presets,
                               caliburn::PlateView& plate) {
-    const bool is_cascade =
-        state.preset_index >= 0 &&
-        state.preset_index < static_cast<int>(presets.size()) &&
-        caliburn::isCascadeModel(presets[state.preset_index]);
-
-    // Assembled by `cascadeDesign`, which every test harness also calls: the
-    // plant the gain was designed against and the plant the plate checks
-    // against cannot be assembled two different ways, and neither can the
-    // plant a test claims to be measuring.
-    caliburn::AutoBalanceDesign d;
-    if (is_cascade) d = caliburn::cascadeDesign(state.current_params);
-
-    std::string reason;
-    bool offered = false;
-    if (!is_cascade) {
-        reason = "plant is not the Ball-Balancer Cascade";
-    } else if (state.ctrl_type != caliburn::ControllerType::LQR) {
-        reason = "select LQR as the controller type";
-    } else if (!state.lqr_result.success) {
-        reason = "the LQR solve failed";
-    } else {
-        d.K = state.lqr_result.K;
-        offered = true;
-    }
-    plate.setDesign(d, offered, reason);
+    plate.setDesign(caliburn::designToOffer(state, presets));
 }
 
 struct FrameContext {
@@ -310,6 +282,7 @@ static void render_frame(void* arg) {
                     caliburn::stateFeedbackClose(state.plant, state.ctrl_K);
                 state.system_valid[3] = true;
             } else {
+                state.ctrl_K = {};   // stale K from a previous solve is not the current design
                 state.system_valid[3] = false;
             }
         } else if (state.ctrl_type == caliburn::ControllerType::GainMatrix &&

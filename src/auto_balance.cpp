@@ -413,4 +413,14 @@ Eigen::VectorXd defaultLqrInputWeights(int m) {
     return presetInputWeights(nominalPreset(), m);
 }
 
+Engage nextEngage(Engage prev, bool usable, bool ball_on, LossKind loss) {
+    if (prev.engaged && !usable)
+        return {false, prev.auto_engaged};
+    if (loss == LossKind::Transient && !prev.engaged && usable && ball_on)
+        return {true, prev.auto_engaged};
+    if (!prev.auto_engaged && !prev.engaged && usable && ball_on)
+        return {true, true};
+    return prev;
+}
+
 }  // namespace caliburn
