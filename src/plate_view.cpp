@@ -213,48 +213,44 @@ bool PlateView::loopDriving() const {
     // Nudge button that does nothing, because the ball it nudges is not being
     // integrated.  Reset Ball was the only way out.
     //
-    // Suspended rather than dropped: `balance_engaged_` is left alone, so
+    // Suspended rather than dropped: `engage_.engaged` is left alone, so
     // putting a ball back resumes the loop rather than asking the visitor to
     // re-engage it.  That is what unchecking and re-checking "Simulate ball"
     // has always done, and these are the same situation.
-    return balance_engaged_ && ball_enabled_ && ball_on_plate_ && designUsable();
+    return engage_.engaged && ball_enabled_ && ball_on_plate_ && designUsable();
 }
 
-void PlateView::setDesign(const AutoBalanceDesign& d, bool offered,
-                          const std::string& reason) {
-    design_ = d;
-    design_offered_ = offered;
-    design_reason_ = reason;
+void PlateView::setDesign(const Offer& offer) {
+    design_ = offer.design;
+    design_offered_ = offer.offered;
+    design_reason_ = offer.reason;
 
-    if (offered && !gainFitsCascade(d)) {
+    // The plate's own checks, layered on top of the model panel's.
+    if (design_offered_ && !gainFitsCascade(design_)) {
         design_reason_ = "the gain is not 3 x 7 - this is not the cascade plant";
-    } else if (offered && !designUsable()) {
-        // The physical sliders move the plant the gain is designed against;
+        design_offered_ = false;
+    } else if (design_offered_ && !designUsable()) {
+        // The physical sliders move the plant the gain was designed against;
         // the simulated plate keeps the geometry and gravity it was built
         // with.  Refusing is the honest answer — engaging would drive one
         // plate with a gain solved for another, and nothing on screen would
         // say so.
         design_reason_ = "plant geometry or gravity differs from the plate";
+        design_offered_ = false;
     }
 
-    // Losing the design mid-run drops the loop rather than freezing the last
-    // command: a stale gain is not a controller.  The one place this happens.
-    if (balance_engaged_ && !designUsable()) balance_engaged_ = false;
+    const bool usable = designUsable();
+    const Engage next = nextEngage(engage_, usable, ball_on_plate_, engage_loss_);
 
-    // And the one place it is engaged without being asked.  The demo cannot
-    // open with `balance_engaged_` simply set true: on the first frame the LQR
-    // solve has not run yet, so the drop above would clear the flag and
-    // nothing would ever set it again.  Engaging on the first usable design
-    // instead means the demo starts balancing the moment it CAN, which is a
-    // frame later and is what "already stabilising at load" amounts to.
-    //
-    // Once, and then never again.  Without the latch this would re-engage a
-    // loop the visitor had deliberately dropped, on the very next frame, which
-    // is the demo arguing with the person using it.
-    if (!auto_engaged_ && !balance_engaged_ && ball_enabled_ && designUsable()) {
-        balance_engaged_ = true;
-        auto_engaged_ = true;
-    }
+    // Record why the loop dropped, if it just did.  The visitor's deliberate
+    // disengagement is recorded in drawBalanceControls instead, where the
+    // checkbox is.
+    if (engage_.engaged && !next.engaged)
+        engage_loss_ = LossKind::Transient;
+    else if (next.engaged)
+        engage_loss_ = LossKind::None;
+
+    engage_ = next;
 }
 
 void PlateView::clearLoss() {
@@ -320,7 +316,8 @@ void PlateView::resetAll() {
     sim_ = simStart(plate_, kHomeLegRad);
     commandAllServos(static_cast<float>(kHomeLegDeg));
     animate_ = false;
-    balance_engaged_ = false;
+    engage_ = Engage{};
+    engage_loss_ = LossKind::None;
     balance_saturated_ = false;
     balance_clipped_ = false;
     report_ = SimReport{};
@@ -749,7 +746,13 @@ void PlateView::drawBalanceControls() {
     }
 
     ImGui::BeginDisabled(!ball_enabled_ || !ball_on_plate_);
-    ImGui::Checkbox("Engage", &balance_engaged_);
+    const bool was_engaged = engage_.engaged;
+    ImGui::Checkbox("Engage", &engage_.engaged);
+    // Record the visitor's intent so nextEngage knows not to re-engage.
+    if (was_engaged && !engage_.engaged)
+        engage_loss_ = LossKind::Deliberate;
+    else if (!was_engaged && engage_.engaged)
+        engage_loss_ = LossKind::None;
     ImGui::EndDisabled();
     if (!ball_enabled_) {
         ImGui::TextWrapped("unavailable: there is no ball to balance");
@@ -764,7 +767,7 @@ void PlateView::drawBalanceControls() {
                            "Reset Ball to resume");
         return;
     }
-    if (!balance_engaged_) {
+    if (!engage_.engaged) {
         ImGui::TextDisabled("gain ready - %d x %d, legs from %.1f deg",
                             (int)design_.K.rows(), (int)design_.K.cols(),
                             design_.home_leg_rad / kDeg);
