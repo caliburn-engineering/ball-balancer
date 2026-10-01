@@ -1,0 +1,18 @@
+# Pinned dependencies for tools/gen_oracle_fixtures.py.
+#
+# scipy provides solve_continuous_are, a Schur-based (LAPACK) CARE solver that
+# is the preferred oracle — independent of the C++ sign-function solver.
+# When scipy is absent the script falls back to a pure-Python sign-function
+# implementation (no external dependencies) that still provides an independent
+# cross-check.
+#
+# To install (once, in a venv):
+#   python3 -m venv .oracle_venv
+#   .oracle_venv/bin/pip install -r tools/requirements.txt
+#
+# To regenerate fixtures after a plant change:
+#   cmake --build build --target export_plants
+#   .oracle_venv/bin/python3 tools/gen_oracle_fixtures.py \
+#       <(./build/export_plants) > tests/oracle_fixture.h
+scipy>=1.11
+numpy>=1.24
