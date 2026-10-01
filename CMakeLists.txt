@@ -18,12 +18,6 @@ endif()
 
 include(FetchContent)
 
-# --- Shared reference implementations ---
-# Golden-source C++ living in the Caliburn workspace, not in this repo.  Every
-# project sits at the same depth under projects/, which is why ball-balancer's
-# sources moved here without touching a single relative include.
-set(CALIBURN_REFERENCE ${CMAKE_CURRENT_SOURCE_DIR}/../../reference)
-
 # --- Eigen ---
 FetchContent_Declare(eigen
     GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
@@ -98,7 +92,7 @@ target_link_libraries(implot PUBLIC imgui)
 
 # --- Analysis library ---
 add_library(analysis_lib STATIC
-    ${CALIBURN_REFERENCE}/integrators/rk4.cpp
+    src/rk4.cpp
     src/analysis/model_library.cpp
     src/analysis/system_properties.cpp
     src/analysis/frequency_response.cpp
@@ -110,11 +104,7 @@ add_library(analysis_lib STATIC
     src/analysis/loop_locus.cpp
     src/analysis/lqr.cpp
 )
-target_include_directories(analysis_lib PUBLIC
-    src
-    ${CALIBURN_REFERENCE}/models       # linear_system.h, linearizer.h
-    ${CALIBURN_REFERENCE}/integrators  # rk4.h
-)
+target_include_directories(analysis_lib PUBLIC src)
 target_link_libraries(analysis_lib PUBLIC Eigen3::Eigen kinematics)
 
 # --- Plate libraries ---
@@ -139,13 +129,10 @@ add_library(ball_dynamics STATIC
     src/ball_sim.cpp
     src/ball_plant_linear.cpp
     src/comparison_sim.cpp
-    ${CALIBURN_REFERENCE}/simulation/rolling_dynamics.cpp
-    ${CALIBURN_REFERENCE}/models/linearizer.cpp
+    src/rolling_dynamics.cpp
+    src/linearizer.cpp
 )
-target_include_directories(ball_dynamics PUBLIC
-    src
-    ${CALIBURN_REFERENCE}/simulation
-)
+target_include_directories(ball_dynamics PUBLIC src)
 # analysis_lib carries rk4 and LinearSystem for both halves of the app.
 target_link_libraries(ball_dynamics PUBLIC analysis_lib kinematics)
 
