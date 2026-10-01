@@ -100,4 +100,56 @@ FrequencyResponse computeBode(
     return result;
 }
 
+int nyquistEncirclements(const std::vector<std::complex<double>>& nyquist) {
+    if (static_cast<int>(nyquist.size()) < 2) return 0;
+    int n = static_cast<int>(nyquist.size());
+
+    // Build the full closed Nyquist contour and compute the winding number of
+    // G(jω) − (−1) around the origin.  The contour is:
+    //   1. Positive frequencies:  nyquist[0] … nyquist[n-1]       (ω: 0 → +∞)
+    //   2. Transition at ω → ∞:  nyquist[n-1] → conj(nyquist[n-1])
+    //   3. Negative frequencies:  conj(nyquist[n-1]) … conj(nyquist[0])
+    //   4. Closure at ω → 0:     conj(nyquist[0]) → nyquist[0]
+    // For a real-coefficient, strictly proper system the DC gain is real so
+    // step 4 contributes zero; step 2 is negligible when G(j∞) ≈ 0.
+
+    const std::complex<double> critical(-1.0, 0.0);
+
+    auto unwrapped_diff = [](double prev_arg, double curr_arg) -> double {
+        double d = curr_arg - prev_arg;
+        while (d > M_PI) d -= 2.0 * M_PI;
+        while (d < -M_PI) d += 2.0 * M_PI;
+        return d;
+    };
+
+    double total = 0.0;
+    double prev = std::arg(nyquist[0] - critical);
+
+    for (int k = 1; k < n; ++k) {
+        double curr = std::arg(nyquist[k] - critical);
+        total += unwrapped_diff(prev, curr);
+        prev = curr;
+    }
+
+    {
+        double curr = std::arg(std::conj(nyquist[n - 1]) - critical);
+        total += unwrapped_diff(prev, curr);
+        prev = curr;
+    }
+
+    for (int k = n - 2; k >= 0; --k) {
+        double curr = std::arg(std::conj(nyquist[k]) - critical);
+        total += unwrapped_diff(prev, curr);
+        prev = curr;
+    }
+
+    {
+        double curr = std::arg(nyquist[0] - critical);
+        total += unwrapped_diff(prev, curr);
+    }
+
+    // CCW positive convention → flip sign for CW (Nyquist criterion's N).
+    return -static_cast<int>(std::round(total / (2.0 * M_PI)));
+}
+
 }  // namespace caliburn

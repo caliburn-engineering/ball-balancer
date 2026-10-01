@@ -36,4 +36,12 @@ FrequencyResponse computeBode(
     const LinearSystem& sys, int output_i, int input_j,
     double freq_min_hz, double freq_max_hz, int num_points);
 
+// Count clockwise encirclements of the critical point (-1, 0) in the full
+// Nyquist diagram constructed from positive-frequency data G(jω).  Returns N
+// such that Z = N + P (Nyquist criterion: Z = closed-loop unstable poles,
+// P = open-loop unstable poles).  N > 0 means clockwise, N < 0 counterclockwise.
+// Requires no open-loop pole on the imaginary axis; behavior is undefined if
+// the curve passes through the critical point.
+int nyquistEncirclements(const std::vector<std::complex<double>>& nyquist);
+
 }  // namespace caliburn
