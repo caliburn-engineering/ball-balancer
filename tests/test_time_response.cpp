@@ -1,6 +1,7 @@
 // tests/test_time_response.cpp
 #include "test_helpers.h"
 #include "analysis/time_response.h"
+#include "assert_rel.h"
 #include <cmath>
 #include <cstdio>
 
@@ -80,6 +81,47 @@ void test_time_response_dimensions() {
     ASSERT_NEAR(resp.points[1].input(1), 0.0, 1e-10);
 }
 
+// Decoupled 2-state system: A = diag(-1, -2), B = I, C = I, D = 0.
+// Matrix exponential is expm(A*t) = diag(exp(-t), exp(-2t)).
+caliburn::LinearSystem make_decoupled_second_order() {
+    caliburn::LinearSystem sys;
+    sys.A = (Eigen::MatrixXd(2, 2) << -1, 0, 0, -2).finished();
+    sys.B = Eigen::MatrixXd::Identity(2, 2);
+    sys.C = Eigen::MatrixXd::Identity(2, 2);
+    sys.D = Eigen::MatrixXd::Zero(2, 2);
+    return sys;
+}
+
+// Impulse j=0, amplitude a: x(0) = B[:,0]*a = (a,0).
+// Exact: y(t) = expm(A*t) * x(0) = (a*exp(-t), 0).
+void test_impulse_matches_matrix_exp() {
+    auto sys = make_decoupled_second_order();
+    double amplitude = 2.0;
+    auto resp = caliburn::computeImpulseResponse(sys, 0, amplitude, 4.0, 0.001);
+    for (int i = 0; i < (int)resp.points.size(); i += 500) {
+        double t = resp.points[i].time;
+        Eigen::VectorXd expected(2);
+        expected(0) = amplitude * std::exp(-t);
+        expected(1) = 0.0;
+        ASSERT_MATRIX_REL_NEAR(resp.points[i].output, expected, 1e-3);
+    }
+}
+
+// Step j=0, amplitude a: x(0)=0, u=(a,0).
+// Exact: y_1(t) = a*(1-exp(-t)), y_2(t) = 0.
+void test_step_matches_matrix_exp() {
+    auto sys = make_decoupled_second_order();
+    double amplitude = 3.0;
+    auto resp = caliburn::computeStepResponse(sys, 0, amplitude, 4.0, 0.001);
+    for (int i = 100; i < (int)resp.points.size(); i += 500) {
+        double t = resp.points[i].time;
+        Eigen::VectorXd expected(2);
+        expected(0) = amplitude * (1.0 - std::exp(-t));
+        expected(1) = 0.0;
+        ASSERT_MATRIX_REL_NEAR(resp.points[i].output, expected, 1e-3);
+    }
+}
+
 int main() {
     test_step_first_order();
     test_step_amplitude();
@@ -87,6 +129,8 @@ int main() {
     test_step_integrator();
     test_ramp_integrator();
     test_time_response_dimensions();
+    test_impulse_matches_matrix_exp();
+    test_step_matches_matrix_exp();
     std::printf("All time_response tests passed.\n");
     return 0;
 }
