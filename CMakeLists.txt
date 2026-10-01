@@ -229,11 +229,17 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(test_attract_mode PRIVATE ball_dynamics)
     target_include_directories(test_attract_mode PRIVATE tests)
     add_test(NAME test_attract_mode COMMAND test_attract_mode)
+
+    add_executable(test_guardrail tests/test_guardrail.cpp)
+    target_link_libraries(test_guardrail PRIVATE ball_dynamics)
+    target_include_directories(test_guardrail PRIVATE tests)
+    add_test(NAME test_guardrail COMMAND test_guardrail)
 endif()
 
 # --- Visualizer executable ---
 add_executable(visualizer
     src/visualizer.cpp
+    src/plate_design.cpp
     src/panels/model_panel.cpp
     src/panels/properties_panel.cpp
     src/panels/pole_zero_panel.cpp

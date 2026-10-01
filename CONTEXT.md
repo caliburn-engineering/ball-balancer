@@ -216,6 +216,28 @@ The plate is a **disc**, so the ball leaves it at a radius of
 *square* and is wrong here; `ballOnPlate` is the test that matches the geometry
 being drawn.
 
+### Usable design
+
+A design is **usable** when all of the following hold: the selected controller
+type is LQR, the Riccati solve succeeded, the gain's shape is `3 × 7` (the
+cascade plant's state and input counts), and the mechanism and gravity the
+gain was designed against match those of the simulated plate.
+
+A design can be *offered* (the model panel is satisfied) but still not usable
+(the plate rejects it on shape or plant mismatch).  `designUsable()` is the
+plate's own verdict; `Offer::offered` is the model panel's.  The loop may not
+drive the plate unless the design is usable — `loopDriving()` is the one place
+that contract is enforced.
+
+> **Not "valid", "ready" or "accepted".**
+> *Valid* and *ready* are vague across the two sides of the seam: the model
+> panel deems a design valid on its own criteria, and the plate on its own.
+> *Accepted* implies a handshake that never happens — the check is one-sided
+> and synchronous.  *Usable* says what it is: a gain you can actually use on
+> this plate, right now.
+
+Decided in [#44](https://github.com/caliburn-engineering/caliburn/issues/44).
+
 ### Balance loop
 
 The closed loop that the LQR design surface exists to produce: `u = -K(x - x_ref)`
@@ -252,7 +274,7 @@ once, over a `float` slider widening to `0.3000000119`.
 > and a Nudge button that did nothing, because the ball it nudges is not being
 > integrated; Reset Ball was the only way out and nothing said so.
 >
-> **Suspended, not dropped.**  `balance_engaged_` is left alone, so putting a
+> **Suspended, not dropped.**  `engage_.engaged` is left alone, so putting a
 > ball back resumes the loop rather than asking the visitor to re-engage it —
 > which is what unchecking and re-checking *Simulate ball* has always done, and
 > these are the same situation.  This is the one precondition that does not go
