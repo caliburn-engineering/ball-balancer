@@ -3,28 +3,74 @@
 #include <Eigen/Eigenvalues>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace caliburn {
+
+namespace {
+// Hungarian algorithm: minimum total distance assignment of n current poles
+// to n previous poles.  Returns perm where perm[i] = j means prev[i] is
+// matched to poles[j].  O(n³), correct for any non-negative real costs.
+//
+// The greedy (nearest-neighbour) alternative is O(n²) but picks the locally
+// nearest unmatched pole for each branch in order, which can assign a pole to
+// the wrong branch when two branches pass near each other and the step is
+// large: greedy "steals" the closer pole for an earlier branch, leaving a
+// farther one for a later branch whose total cost would have been lower.
+std::vector<int> hungarianAssign(
+    const std::vector<std::complex<double>>& poles,
+    const std::vector<std::complex<double>>& prev) {
+    int n = static_cast<int>(poles.size());
+    const double kInf = std::numeric_limits<double>::max() / 2.0;
+
+    // u[i], v[j]: dual potentials (1-indexed; index 0 is a sentinel row).
+    std::vector<double> u(n + 1, 0.0), v(n + 1, 0.0);
+    // p[j]: which prev row is assigned to current column j (1-indexed).
+    // way[j]: which column j0 caused column j's current tentative assignment.
+    std::vector<int> p(n + 1, 0), way(n + 1, 0);
+
+    for (int i = 1; i <= n; ++i) {
+        p[0] = i;
+        int j0 = 0;
+        std::vector<double> minv(n + 1, kInf);
+        std::vector<bool> used(n + 1, false);
+        do {
+            used[j0] = true;
+            int i0 = p[j0];
+            double delta = kInf;
+            int j1 = 0;
+            for (int j = 1; j <= n; ++j) {
+                if (used[j]) continue;
+                double c = std::abs(poles[j - 1] - prev[i0 - 1]) - u[i0] - v[j];
+                if (c < minv[j]) { minv[j] = c; way[j] = j0; }
+                if (minv[j] < delta) { delta = minv[j]; j1 = j; }
+            }
+            for (int j = 0; j <= n; ++j) {
+                if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
+                else           minv[j] -= delta;
+            }
+            j0 = j1;
+        } while (p[j0] != 0);
+        do {
+            int j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+        } while (j0);
+    }
+
+    std::vector<int> perm(n);
+    for (int j = 1; j <= n; ++j)
+        if (p[j]) perm[p[j] - 1] = j - 1;
+    return perm;
+}
+} // anonymous namespace
 
 void matchPoles(std::vector<std::complex<double>>& poles,
                 const std::vector<std::complex<double>>& prev) {
     int n = static_cast<int>(poles.size());
-    std::vector<bool> used(n, false);
+    std::vector<int> perm = hungarianAssign(poles, prev);
     std::vector<std::complex<double>> matched(n);
-    for (int i = 0; i < n; ++i) {
-        double best_dist = std::numeric_limits<double>::max();
-        int best_j = 0;
-        for (int j = 0; j < n; ++j) {
-            if (used[j]) continue;
-            double dist = std::abs(poles[j] - prev[i]);
-            if (dist < best_dist) {
-                best_dist = dist;
-                best_j = j;
-            }
-        }
-        matched[i] = poles[best_j];
-        used[best_j] = true;
-    }
+    for (int i = 0; i < n; ++i) matched[i] = poles[perm[i]];
     poles = matched;
 }
 
