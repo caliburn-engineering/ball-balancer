@@ -13,6 +13,12 @@ struct LqrResult {
     Eigen::MatrixXd K;  // m x n optimal state-feedback gain, u = -Kx
     Eigen::MatrixXd P;  // n x n stabilizing solution of the CARE
     std::vector<std::complex<double>> closed_loop_poles;  // eig(A - BK)
+    // Relative Riccati residual after Newton/Kleinman refinement:
+    //   ||A'P + PA - PBR^-1B'P + Q|| / (||A'P|| + ||PA|| + ||PBR^-1B'P|| + ||Q||)
+    double residual = 0.0;
+    // Residual of the sign-function solution, before refinement.  On the
+    // record so the test can report it without needing to re-run the solver.
+    double pre_refinement_residual = 0.0;
     bool success = false;
     std::string error;
 };

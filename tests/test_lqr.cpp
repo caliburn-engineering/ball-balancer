@@ -1,5 +1,6 @@
 // tests/test_lqr.cpp
 #include "analysis/lqr.h"
+#include "analysis/model_library.h"
 #include "analysis/system_connect.h"
 #include "test_helpers.h"
 
@@ -300,6 +301,70 @@ void test_ball_plate_with_unequal_input_weights() {
     for (const cd& p : r.closed_loop_poles) ASSERT_TRUE(p.real() < 0.0);
 }
 
+// --- Refinement and residual ------------------------------------------------
+
+// Every passing case must achieve a relative Riccati residual below 1e-12
+// after Newton/Kleinman refinement.  This is tested per-system so a future
+// regression is traceable to the plant that regressed.
+void test_residual_below_machine_precision_mass_spring_damper() {
+    const LinearSystem sys = massSpringDamper();
+    const LqrResult r = computeLQR(sys, eye(2), eye(1));
+    ASSERT_TRUE(r.success);
+    ASSERT_TRUE(r.residual < 1e-12);
+}
+
+void test_residual_below_machine_precision_r_heavy() {
+    const LinearSystem sys = massSpringDamper();
+    Eigen::MatrixXd R(1, 1);
+    R << kRHeavy;
+    const LqrResult r = computeLQR(sys, eye(2), R);
+    ASSERT_TRUE(r.success);
+    ASSERT_TRUE(r.residual < 1e-12);
+}
+
+void test_residual_below_machine_precision_ball_plate() {
+    const LinearSystem sys = ballPlate();
+    Eigen::MatrixXd Q = eye(4);
+    Q(0, 0) = 50.0;
+    Q(1, 1) = 50.0;
+    const LqrResult r = computeLQR(sys, Q, eye(2));
+    ASSERT_TRUE(r.success);
+    ASSERT_TRUE(r.residual < 1e-12);
+}
+
+// Reports the pre-refinement relative residual on the cascade plant (7 states,
+// 14×14 Hamiltonian) so the evidence for or against Hamiltonian balancing is
+// on the record.  The assertion is on the post-refinement residual; the
+// pre-refinement number is printed for that record.
+void test_pre_refinement_residual_on_cascade_plant() {
+    const std::vector<ModelEntry>& models = getBuiltinModels();
+    const ModelEntry* cascade = nullptr;
+    for (const auto& m : models)
+        if (isCascadeModel(m)) { cascade = &m; break; }
+    ASSERT_TRUE(cascade != nullptr);
+
+    // Nominal preset weights: leg states = 1, ball position = 100, velocity = 10
+    const int n = cascade->system.states();
+    const int m = cascade->system.inputs();
+    ASSERT_EQ(n, 7);
+    ASSERT_EQ(m, 3);
+    Eigen::VectorXd q_diag = Eigen::VectorXd::Ones(n);
+    q_diag(3) = q_diag(4) = 100.0;  // ball position
+    q_diag(5) = q_diag(6) = 10.0;   // ball velocity
+    const Eigen::MatrixXd Q = q_diag.asDiagonal().toDenseMatrix();
+    const Eigen::MatrixXd R = Eigen::MatrixXd::Identity(m, m);
+
+    const LqrResult r = computeLQR(cascade->system, Q, R);
+    ASSERT_TRUE(r.success);
+
+    std::printf("  cascade plant pre-refinement relative residual:  %.3e\n",
+                r.pre_refinement_residual);
+    std::printf("  cascade plant post-refinement relative residual: %.3e\n",
+                r.residual);
+
+    ASSERT_TRUE(r.residual < 1e-12);
+}
+
 // --- Rejected inputs --------------------------------------------------------
 
 void test_rejects_non_positive_definite_r() {
@@ -392,6 +457,10 @@ int main() {
     test_ball_plate_two_input();
     test_ball_plate_axes_are_symmetric();
     test_ball_plate_with_unequal_input_weights();
+    test_residual_below_machine_precision_mass_spring_damper();
+    test_residual_below_machine_precision_r_heavy();
+    test_residual_below_machine_precision_ball_plate();
+    test_pre_refinement_residual_on_cascade_plant();
     test_rejects_non_positive_definite_r();
     test_rejects_negative_r();
     test_rejects_wrong_sized_q();
