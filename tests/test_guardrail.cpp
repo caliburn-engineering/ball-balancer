@@ -5,10 +5,11 @@
 //   - The invariant that a non-usable design is never handed to the execution
 //     layer, exercised through the `stepSim` seam.
 //
-// Builds against `ball_dynamics` only.  `designToOffer` itself is not called
-// here (it takes AppState which pulls imgui headers), but `Offer` is constructed
-// directly to simulate what `designToOffer` returns for a failed solve.
+// Builds against `ball_dynamics` plus `src/plate_design.cpp`, so the offer
+// decision is the real `designToOffer`.  `AppState` names ImGui colour types,
+// so the ImGui headers are on the include path; nothing links ImGui or GL.
 
+#include "app_state.h"
 #include "attract_mode.h"
 #include "auto_balance.h"
 #include "cascade_fixture.h"
@@ -252,14 +253,22 @@ void test_failed_offer_plate_commands_home_not_stale_tilt() {
     //       frozen at whatever tilt the previous gain was asking for.
     //   (c) The ball does not leave the plate.
     //
-    // The Offer is constructed directly to stand in for what designToOffer
-    // produces when lqr_result.success is false: offered=false, reason set,
-    // design.K empty (cascadeDesign without a K).
+    // Both offers come from designToOffer over the same AppState; only the
+    // solve result changes between them, as when the solver starts failing on
+    // a plant it solved a frame earlier.
     const auto& models = getBuiltinModels();
     const auto& cascade = cascadeModel(models);
 
-    AutoBalanceDesign good = cascadeDesign(cascade.params);
-    good.K = defaultGain(cascade);
+    AppState state;
+    state.preset_index = static_cast<int>(&cascade - models.data());
+    state.ctrl_type = ControllerType::LQR;
+    state.current_params = cascade.params;
+    state.lqr_result.success = true;
+    state.lqr_result.K = defaultGain(cascade);
+
+    const Offer good_offer = designToOffer(state, models);
+    ASSERT_TRUE(good_offer.offered);
+    const AutoBalanceDesign good = good_offer.design;
 
     SimPlate plate = cascadePlate(cascade.params);
     SimState sim   = simStart(plate, kHome, attractStart(openingPath()));
@@ -282,14 +291,14 @@ void test_failed_offer_plate_commands_home_not_stale_tilt() {
     }
     ASSERT_TRUE(engage.engaged);
 
-    // Simulate a failed solver result: offered=false, reason non-empty, K cleared.
-    Offer fail_offer;
-    fail_offer.offered = false;
-    fail_offer.reason  = "the LQR solve failed";
-    fail_offer.design  = cascadeDesign(cascade.params);  // K is empty
+    // The solve fails, and its result still carries the gain it had: the offer
+    // must neither be made nor carry that gain forward.
+    state.lqr_result.success = false;
+    const Offer fail_offer = designToOffer(state, models);
 
     ASSERT_TRUE(!fail_offer.offered);
     ASSERT_TRUE(!fail_offer.reason.empty());
+    ASSERT_EQ(fail_offer.design.K.size(), 0);
 
     // Phase 2: failed design — loop must drop, plate must command home.
     for (int i = 0; i < 5; ++i) {
