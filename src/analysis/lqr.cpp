@@ -238,13 +238,8 @@ LqrResult computeLQR(const LinearSystem& sys,
         return failure("R must be positive definite");
     }
 
-    // Controllability, per the design.  Stabilizability is the weaker condition
-    // the CARE actually needs -- an uncontrollable but already-stable mode is
-    // harmless -- but the check that exists here is the controllability one,
-    // and rejecting a stabilizable-only plant is a false negative with a clear
-    // message rather than a wrong gain.
-    if (!checkControllability(sys).pass) {
-        return failure("plant is not controllable; no stabilizing gain exists");
+    if (!isStabilizable(sys)) {
+        return failure("plant is not stabilizable; an unstable mode is unreachable from the input");
     }
 
     Eigen::MatrixXd P;
