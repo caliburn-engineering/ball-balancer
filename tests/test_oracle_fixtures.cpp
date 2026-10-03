@@ -12,13 +12,13 @@
 // of our Eigen sign-function + Kleinman solver, so agreement rules out a bug
 // shared by both.  Measured agreement on the three cascade presets is ~1e-14
 // (dK, dP) and ~1e-13 (residual) — i.e. the two algorithms converge on the
-// same CARE solution to machine precision.  The tolerances below sit ~two
-// orders above that measured floor: tight enough that any real regression trips
-// them, loose enough to absorb ordinary floating-point/platform variance.
+// same CARE solution to machine precision.  The relative tolerances below sit
+// ~four orders above that measured floor: tight enough that any real regression
+// trips them, loose enough to absorb ordinary floating-point/platform variance.
 //
-// (The relative-residual-at-1e-12 assertion the design calls for lives in
-// test_lqr.cpp under the CARE-hardening ticket; here the residual is a
-// secondary sanity bound alongside the oracle match.)
+// (The absolute-residual assertion at 1e-12 lives in test_lqr.cpp under the
+// CARE-hardening ticket; here the relative residual is a secondary sanity bound
+// alongside the oracle match.)
 //
 // Running the oracle generator:
 //   cmake --build build --target export_plants
@@ -26,30 +26,108 @@
 
 #include "analysis/lqr.h"
 #include "analysis/model_library.h"
+#include "assert_rel.h"
 #include "auto_balance.h"
 #include "oracle_fixture.h"
 #include "test_helpers.h"
 
 #include <Eigen/Core>
+#include <cinttypes>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 using namespace caliburn;
 
 namespace {
 
-constexpr double kGainTol    = 1e-11;  // max Frobenius distance oracle vs computed (measured ~1e-14)
-constexpr double kResTol     = 1e-10;  // CARE residual bound (measured ~1e-13)
+// Relative tolerances — the measured floor for K and P agreement is ~1e-14,
+// so 1e-10 gives ~four orders of headroom against platform variation.
+constexpr double kGainRelTol = 1e-10;
+// res.residual is already a dimensionless relative residual; measured ~1e-13.
+constexpr double kResRelTol  = 1e-8;
 
-double riccatiResidual(const LinearSystem& sys,
-                       const Eigen::MatrixXd& Q,
-                       const Eigen::MatrixXd& R,
-                       const Eigen::MatrixXd& P) {
-    const Eigen::MatrixXd res =
-        sys.A.transpose() * P + P * sys.A
-        - P * sys.B * R.inverse() * sys.B.transpose() * P + Q;
-    return res.norm();
+// ── Plant hash (mirrors export_plants.cpp exactly) ───────────────────────────
+//
+// Replicating these two functions rather than sharing them keeps the test
+// self-contained (no Python, no oracle tool at build time) and lets a future
+// change to the export format be detected as a hash mismatch before it
+// silently corrupts a fixture.
+
+// Full-precision MATLAB-style matrix string — %.17g per element, rows
+// separated by "; ", columns by " ".  Must match export_plants.cpp:matrixFull.
+std::string matrixFull(const Eigen::MatrixXd& m) {
+    std::string s;
+    char buf[32];
+    for (int r = 0; r < m.rows(); ++r) {
+        if (r > 0) s += "; ";
+        for (int c = 0; c < m.cols(); ++c) {
+            if (c > 0) s += " ";
+            std::snprintf(buf, sizeof(buf), "%.17g", m(r, c));
+            s += buf;
+        }
+    }
+    return s;
 }
+
+// DJB2-64.  Must match export_plants.cpp:djb2_64 exactly.
+uint64_t djb2_64(const std::string& s) {
+    uint64_t h = 5381;
+    for (unsigned char c : s) h = h * 33u + c;
+    return h;
+}
+
+// Hash A, B, Q, R using the same scheme as export_plants.cpp:makeRecord.
+uint64_t hashFor(const LinearSystem& sys,
+                 const Eigen::MatrixXd& Q,
+                 const Eigen::MatrixXd& R) {
+    const std::string combined =
+        matrixFull(sys.A) + "|" +
+        matrixFull(sys.B) + "|" +
+        matrixFull(Q)     + "|" +
+        matrixFull(R);
+    return djb2_64(combined);
+}
+
+// ── Staleness guard ───────────────────────────────────────────────────────────
+//
+// Recomputes the plant hash from the live plant and compares it to the hash
+// baked into oracle_fixture.h.  A mismatch means the plant or weight matrices
+// changed without regenerating the fixture; the error message is distinct from
+// a numerical-mismatch failure (which reads "FAIL") so the two are told apart.
+
+void checkStaleness(const char* label,
+                    const LinearSystem& sys,
+                    const LqrPreset& preset,
+                    const char* fixture_hash_str) {
+    const int n = sys.states();
+    const int m = sys.inputs();
+    const Eigen::MatrixXd Q = presetStateWeights(preset, n).asDiagonal().toDenseMatrix();
+    const Eigen::MatrixXd R = presetInputWeights(preset, m).asDiagonal().toDenseMatrix();
+
+    const uint64_t live = hashFor(sys, Q, R);
+
+    uint64_t stored = 0;
+    std::sscanf(fixture_hash_str, "%" SCNx64, &stored);
+
+    if (live != stored) {
+        std::fprintf(stderr,
+            "STALE FIXTURE [%s]: plant hash mismatch — the plant or weight\n"
+            "  matrices changed since oracle_fixture.h was last generated.\n"
+            "  fixture hash : %s\n"
+            "  live hash    : %016" PRIx64 "\n"
+            "  Regenerate:\n"
+            "    cmake --build build --target export_plants\n"
+            "    ./build/export_plants | python3 tools/gen_oracle_fixtures.py - \\\n"
+            "        > tests/oracle_fixture.h\n",
+            label, fixture_hash_str, live);
+        std::exit(1);
+    }
+
+    std::printf("  [%s] hash %s  OK\n", label, fixture_hash_str);
+}
+
+// ── Numerical comparison ──────────────────────────────────────────────────────
 
 void checkPreset(const char* label,
                  const LinearSystem& sys,
@@ -65,37 +143,19 @@ void checkPreset(const char* label,
     const LqrResult res = computeLQR(sys, Q, R);
     ASSERT_TRUE(res.success);
 
-    // Riccati residual: the solver must satisfy the equation it claims to solve.
-    const double residual = riccatiResidual(sys, Q, R, res.P);
-    if (residual >= kResTol) {
-        std::fprintf(stderr, "FAIL [%s]: Riccati residual %.3e >= %.3e\n",
-                     label, residual, kResTol);
-        std::exit(1);
-    }
+    // Relative Riccati residual: the solver must satisfy the equation it claims
+    // to solve.  res.residual is already a dimensionless relative norm.
+    ASSERT_REL_NEAR(res.residual, 0.0, kResRelTol);
 
-    // Gain agreement: the oracle K and the computed K must be close.
-    const double gain_dist = (res.K - oracle_K).norm();
-    if (gain_dist >= kGainTol) {
-        std::fprintf(stderr,
-            "FAIL [%s]: K differs from oracle by %.3e (tolerance %.3e)\n"
-            "  oracle K norm   : %.6g\n"
-            "  computed K norm : %.6g\n",
-            label, gain_dist, kGainTol,
-            oracle_K.norm(), res.K.norm());
-        std::exit(1);
-    }
-
-    // Riccati solution agreement.
-    const double P_dist = (res.P - oracle_P).norm();
-    if (P_dist >= kGainTol) {
-        std::fprintf(stderr,
-            "FAIL [%s]: P differs from oracle by %.3e (tolerance %.3e)\n",
-            label, P_dist, kGainTol);
-        std::exit(1);
-    }
+    // Gain and Riccati solution must agree with the oracle to relative tolerance.
+    ASSERT_MATRIX_REL_NEAR(res.K, oracle_K, kGainRelTol);
+    ASSERT_MATRIX_REL_NEAR(res.P, oracle_P, kGainRelTol);
 
     std::printf("  [%s] residual=%.2e  dK=%.2e  dP=%.2e  OK\n",
-                label, residual, gain_dist, P_dist);
+                label,
+                res.residual,
+                (res.K - oracle_K).norm(),
+                (res.P - oracle_P).norm());
 }
 
 }  // namespace
@@ -110,7 +170,17 @@ int main() {
         return 1;
     }
 
-    std::printf("Oracle fixture comparison (cascade LQR presets):\n");
+    // Staleness checks run first: a stale fixture gives a confusing numerical
+    // mismatch, and the error message distinguishes the two failure modes.
+    std::printf("Oracle fixture staleness check:\n");
+    checkStaleness("Detuned",    cascade->system, lqrPresets()[0],
+                   oracle::kHash_cascade_detuned);
+    checkStaleness("Nominal",    cascade->system, lqrPresets()[1],
+                   oracle::kHash_cascade_nominal);
+    checkStaleness("Aggressive", cascade->system, lqrPresets()[2],
+                   oracle::kHash_cascade_aggressive);
+
+    std::printf("\nOracle fixture comparison (cascade LQR presets):\n");
     checkPreset("Detuned",    cascade->system,
                 lqrPresets()[0],
                 oracle::oracle_K_cascade_detuned(),
