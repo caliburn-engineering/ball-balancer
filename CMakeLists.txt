@@ -229,6 +229,21 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(test_attract_mode PRIVATE ball_dynamics)
     target_include_directories(test_attract_mode PRIVATE tests)
     add_test(NAME test_attract_mode COMMAND test_attract_mode)
+
+    # Wide pumping sweep — 21 gain nudges (1e-15 to 1e-12, both signs) over
+    # the full 12x12 grid.  Off by default; run with
+    #   cmake -DBALL_BALANCER_PUMPING_WIDE_SWEEP=ON
+    # and then
+    #   ctest -L slow
+    # to re-measure the ceilings in test_the_loop_never_pumps_a_bouncing_ball.
+    option(BALL_BALANCER_PUMPING_WIDE_SWEEP
+           "Enable the 21-nudge wide sweep in test_attract_mode (slow, opt-in)"
+           OFF)
+    if(BALL_BALANCER_PUMPING_WIDE_SWEEP)
+        target_compile_definitions(test_attract_mode
+            PRIVATE BALL_BALANCER_PUMPING_WIDE_SWEEP)
+        set_tests_properties(test_attract_mode PROPERTIES LABELS "slow")
+    endif()
 endif()
 
 # --- Visualizer executable ---
