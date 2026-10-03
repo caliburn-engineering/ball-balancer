@@ -255,7 +255,7 @@ if(NOT EMSCRIPTEN)
 
     add_executable(test_oracle_fixtures tests/test_oracle_fixtures.cpp)
     target_link_libraries(test_oracle_fixtures PRIVATE ball_dynamics)
-    target_include_directories(test_oracle_fixtures PRIVATE tests)
+    target_include_directories(test_oracle_fixtures PRIVATE tests tools)
     add_test(NAME test_oracle_fixtures COMMAND test_oracle_fixtures)
 endif()
 
@@ -267,6 +267,7 @@ endif()
 if(NOT EMSCRIPTEN)
     add_executable(export_plants tools/export_plants.cpp)
     target_link_libraries(export_plants PRIVATE ball_dynamics)
+    target_include_directories(export_plants PRIVATE tools)
 endif()
 
 # --- Visualizer executable ---

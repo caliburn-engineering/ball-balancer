@@ -19,6 +19,7 @@
 
 #include "analysis/model_library.h"
 #include "auto_balance.h"
+#include "plant_hash.h"
 
 #include <Eigen/Core>
 #include <cstdio>
@@ -29,33 +30,6 @@
 using namespace caliburn;
 
 namespace {
-
-// Full-precision MATLAB-style matrix string (%.17g per element).
-// The existing matrixToString uses %g (6 sig figs), which is not enough
-// for an oracle: tiny rounding differences in the Jacobian coefficients
-// propagate into the gain and make the fixture fail at tight tolerances.
-std::string matrixFull(const Eigen::MatrixXd& m) {
-    std::string s;
-    char buf[32];
-    for (int r = 0; r < m.rows(); ++r) {
-        if (r > 0) s += "; ";
-        for (int c = 0; c < m.cols(); ++c) {
-            if (c > 0) s += " ";
-            std::snprintf(buf, sizeof(buf), "%.17g", m(r, c));
-            s += buf;
-        }
-    }
-    return s;
-}
-
-// DJB2-64: a simple, portable hash for staleness detection.
-// The Python generator and any downstream tool can reproduce it from the
-// same string with no external library.
-uint64_t djb2_64(const std::string& s) {
-    uint64_t h = 5381;
-    for (unsigned char c : s) h = h * 33u + c;
-    return h;
-}
 
 // Escape a string for JSON output (handles the few characters that appear in
 // matrix strings: digits, spaces, semicolons, minus signs, 'e', 'E', '.').
@@ -90,8 +64,7 @@ PlantRecord makeRecord(const std::string& name,
     rec.Q = matrixFull(Q);
     rec.R = matrixFull(R);
 
-    const std::string combined = rec.A + "|" + rec.B + "|" + rec.Q + "|" + rec.R;
-    rec.hash = djb2_64(combined);
+    rec.hash = plantHash(sys, Q, R);
     return rec;
 }
 

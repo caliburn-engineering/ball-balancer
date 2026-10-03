@@ -16,8 +16,8 @@
 // ~four orders above that measured floor: tight enough that any real regression
 // trips them, loose enough to absorb ordinary floating-point/platform variance.
 //
-// (The absolute-residual assertion at 1e-12 lives in test_lqr.cpp under the
-// CARE-hardening ticket; here the relative residual is a secondary sanity bound
+// (The relative-residual assertion at 1e-12 lives in test_lqr.cpp under the
+// CARE-hardening ticket; here the residual is a secondary sanity bound
 // alongside the oracle match.)
 //
 // Running the oracle generator:
@@ -29,6 +29,7 @@
 #include "assert_rel.h"
 #include "auto_balance.h"
 #include "oracle_fixture.h"
+#include "plant_hash.h"
 #include "test_helpers.h"
 
 #include <Eigen/Core>
@@ -47,48 +48,6 @@ constexpr double kGainRelTol = 1e-10;
 // res.residual is already a dimensionless relative residual; measured ~1e-13.
 constexpr double kResRelTol  = 1e-8;
 
-// ── Plant hash (mirrors export_plants.cpp exactly) ───────────────────────────
-//
-// Replicating these two functions rather than sharing them keeps the test
-// self-contained (no Python, no oracle tool at build time) and lets a future
-// change to the export format be detected as a hash mismatch before it
-// silently corrupts a fixture.
-
-// Full-precision MATLAB-style matrix string — %.17g per element, rows
-// separated by "; ", columns by " ".  Must match export_plants.cpp:matrixFull.
-std::string matrixFull(const Eigen::MatrixXd& m) {
-    std::string s;
-    char buf[32];
-    for (int r = 0; r < m.rows(); ++r) {
-        if (r > 0) s += "; ";
-        for (int c = 0; c < m.cols(); ++c) {
-            if (c > 0) s += " ";
-            std::snprintf(buf, sizeof(buf), "%.17g", m(r, c));
-            s += buf;
-        }
-    }
-    return s;
-}
-
-// DJB2-64.  Must match export_plants.cpp:djb2_64 exactly.
-uint64_t djb2_64(const std::string& s) {
-    uint64_t h = 5381;
-    for (unsigned char c : s) h = h * 33u + c;
-    return h;
-}
-
-// Hash A, B, Q, R using the same scheme as export_plants.cpp:makeRecord.
-uint64_t hashFor(const LinearSystem& sys,
-                 const Eigen::MatrixXd& Q,
-                 const Eigen::MatrixXd& R) {
-    const std::string combined =
-        matrixFull(sys.A) + "|" +
-        matrixFull(sys.B) + "|" +
-        matrixFull(Q)     + "|" +
-        matrixFull(R);
-    return djb2_64(combined);
-}
-
 // ── Staleness guard ───────────────────────────────────────────────────────────
 //
 // Recomputes the plant hash from the live plant and compares it to the hash
@@ -105,7 +64,7 @@ void checkStaleness(const char* label,
     const Eigen::MatrixXd Q = presetStateWeights(preset, n).asDiagonal().toDenseMatrix();
     const Eigen::MatrixXd R = presetInputWeights(preset, m).asDiagonal().toDenseMatrix();
 
-    const uint64_t live = hashFor(sys, Q, R);
+    const uint64_t live = plantHash(sys, Q, R);
 
     uint64_t stored = 0;
     std::sscanf(fixture_hash_str, "%" SCNx64, &stored);
@@ -145,7 +104,7 @@ void checkPreset(const char* label,
 
     // Relative Riccati residual: the solver must satisfy the equation it claims
     // to solve.  res.residual is already a dimensionless relative norm.
-    ASSERT_REL_NEAR(res.residual, 0.0, kResRelTol);
+    ASSERT_TRUE(res.residual < kResRelTol);
 
     // Gain and Riccati solution must agree with the oracle to relative tolerance.
     ASSERT_MATRIX_REL_NEAR(res.K, oracle_K, kGainRelTol);
