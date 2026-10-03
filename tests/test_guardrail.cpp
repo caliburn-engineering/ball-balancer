@@ -5,13 +5,15 @@
 //   - The invariant that a non-usable design is never handed to the execution
 //     layer, exercised through the `stepSim` seam.
 //
-// Builds against `ball_dynamics` only.  `designToOffer` is not called here —
-// the test constructs AutoBalanceDesign objects directly and drives nextEngage
-// and stepSim from them.
+// Builds against `ball_dynamics` plus `src/plate_design.cpp`, so the offer
+// decision is the real `designToOffer`.  `AppState` names ImGui colour types,
+// so the ImGui headers are on the include path; nothing links ImGui or GL.
 
+#include "app_state.h"
 #include "attract_mode.h"
 #include "auto_balance.h"
 #include "cascade_fixture.h"
+#include "plate_design.h"
 #include "sim_step.h"
 #include "test_helpers.h"
 
@@ -239,6 +241,83 @@ void test_deliberate_drop_does_not_reengage_when_design_returns() {
     ASSERT_TRUE(!engage.engaged);  // deliberate: stays dropped
 }
 
+// ---------------------------------------------------------------------------
+// AC3 end-to-end: non-offered design → engagement off → plate holds home pose
+// ---------------------------------------------------------------------------
+
+void test_failed_offer_plate_commands_home_not_stale_tilt() {
+    // Asserts the full AC3 chain:
+    //   (a) A non-offered design (with a reason, same as designToOffer returns
+    //       on a failed LQR solve) drives engagement off.
+    //   (b) Through the stepSim seam the plate is commanded to home — not
+    //       frozen at whatever tilt the previous gain was asking for.
+    //   (c) The ball does not leave the plate.
+    //
+    // Both offers come from designToOffer over the same AppState; only the
+    // solve result changes between them, as when the solver starts failing on
+    // a plant it solved a frame earlier.
+    const auto& models = getBuiltinModels();
+    const auto& cascade = cascadeModel(models);
+
+    AppState state;
+    state.preset_index = static_cast<int>(&cascade - models.data());
+    state.ctrl_type = ControllerType::LQR;
+    state.current_params = cascade.params;
+    state.lqr_result.success = true;
+    state.lqr_result.K = defaultGain(cascade);
+
+    const Offer good_offer = designToOffer(state, models);
+    ASSERT_TRUE(good_offer.offered);
+    const AutoBalanceDesign good = good_offer.design;
+
+    SimPlate plate = cascadePlate(cascade.params);
+    SimState sim   = simStart(plate, kHome, attractStart(openingPath()));
+
+    const bool usable_good =
+        gainFitsCascade(good) &&
+        samePlant(good.mechanism, good.gravity,
+                  plate.kinematics().params(), plate.gravity());
+
+    Engage   engage{};
+    LossKind loss = LossKind::None;
+
+    // Phase 1: engage the loop with a good design.
+    for (int i = 0; i < 20; ++i) {
+        advanceEngage(engage, loss, usable_good, true);
+        SimInput in; in.dt = kDt; in.design = good;
+        in.closed_loop  = engage.engaged && usable_good;
+        in.ball_enabled = true;
+        stepSim(plate, in, sim);
+    }
+    ASSERT_TRUE(engage.engaged);
+
+    // The solve fails, and its result still carries the gain it had: the offer
+    // must neither be made nor carry that gain forward.
+    state.lqr_result.success = false;
+    const Offer fail_offer = designToOffer(state, models);
+
+    ASSERT_TRUE(!fail_offer.offered);
+    ASSERT_TRUE(!fail_offer.reason.empty());
+    ASSERT_EQ(fail_offer.design.K.size(), 0);
+
+    // Phase 2: failed design — loop must drop, plate must command home.
+    for (int i = 0; i < 5; ++i) {
+        const bool usable = gainFitsCascade(fail_offer.design);  // false: K empty
+        advanceEngage(engage, loss, usable, true);
+
+        SimInput in; in.dt = kDt; in.design = fail_offer.design;
+        in.closed_loop  = engage.engaged && usable;  // false
+        in.ball_enabled = true;
+        const SimReport rep = stepSim(plate, in, sim);
+
+        ASSERT_TRUE(!engage.engaged);
+        // open_loop_cmd_rad defaults to home; closed_loop is false.
+        for (int j = 0; j < 3; ++j)
+            ASSERT_NEAR(rep.cmd_rad[j], kHome, 1e-9);
+        ASSERT_TRUE(!rep.left_plate);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -250,6 +329,7 @@ int main() {
     test_closed_loop_keeps_ball_from_opening_position();
     test_loop_drops_and_reengages_on_transient_design_loss();
     test_deliberate_drop_does_not_reengage_when_design_returns();
+    test_failed_offer_plate_commands_home_not_stale_tilt();
 
     std::printf("test_guardrail: all tests passed\n");
     return 0;

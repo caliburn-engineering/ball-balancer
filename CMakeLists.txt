@@ -245,9 +245,12 @@ if(NOT EMSCRIPTEN)
         set_tests_properties(test_attract_mode PROPERTIES LABELS "slow")
     endif()
 
-    add_executable(test_guardrail tests/test_guardrail.cpp)
+    # plate_design.cpp is compiled in so the guardrail test calls the real
+    # designToOffer.  AppState names ImGui colour types, so the ImGui headers
+    # are needed; the library is not linked, keeping GL out of the test.
+    add_executable(test_guardrail tests/test_guardrail.cpp src/plate_design.cpp)
     target_link_libraries(test_guardrail PRIVATE ball_dynamics)
-    target_include_directories(test_guardrail PRIVATE tests)
+    target_include_directories(test_guardrail PRIVATE tests ${imgui_SOURCE_DIR})
     add_test(NAME test_guardrail COMMAND test_guardrail)
 
     add_executable(test_oracle_fixtures tests/test_oracle_fixtures.cpp)
