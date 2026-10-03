@@ -9,7 +9,6 @@
 #include <Eigen/SVD>
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <string>
 #include <utility>
 
@@ -21,6 +20,10 @@ namespace {
 // working budget.
 constexpr double kSignTol = 1e-9;
 constexpr int kMaxIter = 100;
+
+// Kleinman refinement cap.  Quadratic convergence means 1-2 steps from a good
+// sign-function starting point; 5 is insurance, not a working budget.
+constexpr int kMaxRefine = 5;
 
 // A closed-loop pole this close to the imaginary axis, relative to the size of
 // the closed-loop matrix, is marginal rather than stable: the cost integral
@@ -45,9 +48,8 @@ bool isSymmetric(const Eigen::MatrixXd& M, double tol) {
 //
 // The method: the stable invariant subspace of the Hamiltonian carries P, and
 // sign(H) is the projector that exposes it.  Newton's iteration for the sign
-// function is Z <- (Z + Z^-1)/2, written below as Z - (Z - Z^-1)/2; the
-// determinant scaling ck is the standard equilibration that stops the early
-// iterates from wandering when H is badly scaled.
+// function is Z <- (Z + Z^-1)/2; norm scaling gamma = sqrt(||Z^-1||/||Z||)
+// balances the two arms each step without computing a determinant.
 bool solveCARE(const Eigen::MatrixXd& A,
                const Eigen::MatrixXd& B,
                const Eigen::MatrixXd& Q,
@@ -61,33 +63,31 @@ bool solveCARE(const Eigen::MatrixXd& A,
          Q, -A.transpose();
 
     Eigen::MatrixXd Z = H;
-    const double two_n = static_cast<double>(2 * n);
     bool converged = false;
 
     for (int iter = 0; iter < kMaxIter; ++iter) {
-        const Eigen::MatrixXd Z_old = Z;
-
-        // A singular iterate means the Hamiltonian has an eigenvalue on the
-        // imaginary axis, so no stable/unstable splitting exists and the sign
-        // function is undefined.  Bailing here beats dividing by zero and
-        // returning a matrix of NaNs that later reads as a plausible gain.
-        const double det = std::abs(Z.determinant());
-        if (!std::isfinite(det) || det < std::numeric_limits<double>::min()) {
-            return false;
-        }
-
-        Z *= std::pow(det, -1.0 / two_n);
+        // Norm scaling: gamma = sqrt(||Z^-1|| / ||Z||) balances the two arms of
+        // the Newton step without touching the determinant, which overflows or
+        // underflows on a large-but-workable Hamiltonian.  If the inverse is
+        // not finite the Hamiltonian has an eigenvalue on the imaginary axis and
+        // the sign function is undefined.
         const Eigen::MatrixXd Z_inv = Z.inverse();
-        Z = Z - 0.5 * (Z - Z_inv);
-        if (!Z.allFinite()) return false;
+        if (!Z_inv.allFinite()) return false;
+        const double zn = Z.norm();
+        const double zi = Z_inv.norm();
+        const double gamma = (zn > 0.0 && zi > 0.0) ? std::sqrt(zi / zn) : 1.0;
+        const Eigen::MatrixXd Z_new = 0.5 * (gamma * Z + (1.0 / gamma) * Z_inv);
+        if (!Z_new.allFinite()) return false;
 
         // Relative, matching the tolerances on Q and R above: an absolute
         // threshold reads as "not converged" on a badly scaled plant and stops
         // early on a finely scaled one.
-        if ((Z - Z_old).norm() < kSignTol * std::max(1.0, Z.norm())) {
+        if ((Z_new - Z).norm() < kSignTol * std::max(1.0, Z_new.norm())) {
+            Z = Z_new;
             converged = true;
             break;
         }
+        Z = Z_new;
     }
     if (!converged) return false;
 
@@ -116,6 +116,77 @@ bool solveCARE(const Eigen::MatrixXd& A,
     // dependent on which triangle it happened to read.
     P = 0.5 * (P + P.transpose()).eval();
     return true;
+}
+
+// Relative Riccati residual: equation norm over the sum of its terms' norms.
+// Zero when all terms vanish.
+double relRiccatiResidual(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B,
+                          const Eigen::MatrixXd& Q,
+                          const Eigen::LLT<Eigen::MatrixXd>& R_chol,
+                          const Eigen::MatrixXd& P) {
+    const Eigen::MatrixXd At_P    = A.transpose() * P;
+    const Eigen::MatrixXd P_A     = P * A;
+    const Eigen::MatrixXd PBRiBtP = P * B * R_chol.solve(B.transpose() * P);
+    const Eigen::MatrixXd residual = At_P + P_A - PBRiBtP + Q;
+    const double den = At_P.norm() + P_A.norm() + PBRiBtP.norm() + Q.norm();
+    return (den > 0.0) ? residual.norm() / den : 0.0;
+}
+
+// Solve A'X + XA = C for symmetric X using the Kronecker product identity:
+//   (I ⊗ A' + A^T ⊗ I) vec(X) = vec(C).
+// The n^2 × n^2 system is cheap for the plant sizes this solver handles (n ≤ ~14).
+// A must be stable for a unique positive-definite solution to exist when C is
+// positive-definite.
+bool solveLyapunov(const Eigen::MatrixXd& A, const Eigen::MatrixXd& C,
+                   Eigen::MatrixXd& X) {
+    const int n = static_cast<int>(A.rows());
+    const int n2 = n * n;
+    Eigen::MatrixXd M = Eigen::MatrixXd::Zero(n2, n2);
+    const Eigen::MatrixXd At = A.transpose();
+
+    // I ⊗ A': block-diagonal, each n×n block is A'.
+    for (int i = 0; i < n; ++i)
+        M.block(i * n, i * n, n, n) += At;
+
+    // A^T ⊗ I: the (i,j)-th n×n block is A(j,i) * I_n.
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            M.block(i * n, j * n, n, n).diagonal().array() += A(j, i);
+
+    const Eigen::VectorXd rhs = Eigen::Map<const Eigen::VectorXd>(C.data(), n2);
+    const Eigen::FullPivLU<Eigen::MatrixXd> lu(M);
+    if (!lu.isInvertible()) return false;
+    const Eigen::VectorXd sol = lu.solve(rhs);
+    if (!sol.allFinite()) return false;
+
+    X = Eigen::Map<const Eigen::MatrixXd>(sol.data(), n, n);
+    X = 0.5 * (X + X.transpose()).eval();
+    return true;
+}
+
+// Newton/Kleinman refinement of a CARE solution.  Each step solves the
+// Lyapunov equation with the current closed-loop A, giving quadratic
+// convergence.  Stops when the relative residual stops falling or reaches
+// near-machine-precision.  Returns the relative residual after refinement.
+double kleinmanRefine(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B,
+                      const Eigen::MatrixXd& Q,
+                      const Eigen::LLT<Eigen::MatrixXd>& R_chol,
+                      Eigen::MatrixXd& P) {
+    double res = relRiccatiResidual(A, B, Q, R_chol, P);
+    for (int iter = 0; iter < kMaxRefine; ++iter) {
+        const Eigen::MatrixXd K    = R_chol.solve(B.transpose() * P);
+        const Eigen::MatrixXd A_K  = A - B * K;
+        // C = Q + K'RK = Q + P B R^{-1} B' P  (using symmetry of P and R)
+        const Eigen::MatrixXd C    = Q + P * B * K;
+        Eigen::MatrixXd P_new;
+        if (!solveLyapunov(A_K, -C, P_new)) break;
+        if (!P_new.allFinite()) break;
+        const double new_res = relRiccatiResidual(A, B, Q, R_chol, P_new);
+        if (new_res >= res) break;
+        P   = P_new;
+        res = new_res;
+    }
+    return res;
 }
 
 LqrResult failure(std::string why) {
@@ -182,6 +253,8 @@ LqrResult computeLQR(const LinearSystem& sys,
     }
 
     LqrResult result;
+    result.pre_refinement_residual = relRiccatiResidual(sys.A, sys.B, Q, R_chol, P);
+    result.residual = kleinmanRefine(sys.A, sys.B, Q, R_chol, P);
     result.P = P;
     result.K = R_chol.solve(sys.B.transpose() * P);
 
