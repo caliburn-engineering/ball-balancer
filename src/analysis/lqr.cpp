@@ -22,18 +22,6 @@ namespace {
 constexpr double kSignTol = 1e-9;
 constexpr int kMaxIter = 100;
 
-// Relative Riccati residual gate.  A residual this large after Newton/Kleinman
-// refinement means the sign-function output was not a valid CARE solution —
-// either the iteration converged to the wrong invariant subspace, or the P
-// extraction from the sign blocks was numerically poor.  Returning a gain in
-// this state violates the contract ("never a silently wrong gain"), so the
-// solver treats this as a hard failure.
-//
-// The gate sits well above the 1e-12 assertion the test suite places on normal
-// solutions: genuine solutions land at 1e-12 to 1e-15, so the gate only trips
-// on genuine breakage and never on numerical noise in a good solve.
-constexpr double kResidualGate = 1e-8;
-
 // Kleinman refinement cap.  Quadratic convergence means 1-2 steps from a good
 // sign-function starting point; 5 is insurance, not a working budget.
 constexpr int kMaxRefine = 5;
@@ -212,7 +200,8 @@ LqrResult failure(std::string why) {
 
 LqrResult computeLQR(const LinearSystem& sys,
                      const Eigen::MatrixXd& Q,
-                     const Eigen::MatrixXd& R) {
+                     const Eigen::MatrixXd& R,
+                     double residual_gate) {
     const int n = sys.states();
     const int m = sys.inputs();
 
@@ -264,11 +253,14 @@ LqrResult computeLQR(const LinearSystem& sys,
     result.pre_refinement_residual = relRiccatiResidual(sys.A, sys.B, Q, R_chol, P);
     result.residual = kleinmanRefine(sys.A, sys.B, Q, R_chol, P);
 
-    if (result.residual > kResidualGate) {
+    // A residual above the gate after refinement means the sign function found
+    // the wrong invariant subspace or P came out of its blocks badly.  Returning
+    // that gain would break the contract, so it is a failure like any other.
+    if (result.residual > residual_gate) {
         char buf[128];
         std::snprintf(buf, sizeof(buf),
-                      "Riccati residual too large after refinement: %.3e (limit 1e-8)",
-                      result.residual);
+                      "Riccati residual too large after refinement: %.3e (limit %.0e)",
+                      result.residual, residual_gate);
         return failure(std::string(buf));
     }
 

@@ -33,10 +33,18 @@ struct LqrResult {
 // play no part in a regulator.
 //
 // On failure `success` is false, `error` states why, and K, P and the pole
-// list are empty.  Failure is a rejected input or a non-converging iteration,
-// never a silently wrong gain.
+// list are empty.  Failure is a rejected input, a non-converging iteration, or
+// a relative Riccati residual above `residual_gate` after refinement — never a
+// silently wrong gain.
+//
+// Normal solutions land at 1e-12 or below, so the default gate trips only on
+// genuine breakage.  Callers leave it alone; a test lowers it to make the gate
+// fire on a well-conditioned plant.
+constexpr double kLqrResidualGate = 1e-8;
+
 LqrResult computeLQR(const LinearSystem& sys,
                      const Eigen::MatrixXd& Q,
-                     const Eigen::MatrixXd& R);
+                     const Eigen::MatrixXd& R,
+                     double residual_gate = kLqrResidualGate);
 
 }  // namespace caliburn

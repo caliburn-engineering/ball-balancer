@@ -507,7 +507,7 @@ void test_residual_gate_is_never_tripped_by_suite_inputs() {
         const LqrResult r = computeLQR(c.sys, c.Q, c.R);
         ASSERT_TRUE(r.success);
         // Well below the 1e-8 gate: genuine breakage would not look like this.
-        ASSERT_TRUE(r.residual < 1e-8);
+        ASSERT_TRUE(r.residual < kLqrResidualGate);
     }
 }
 
@@ -551,12 +551,31 @@ void test_input_rejection_messages_do_not_contain_residual() {
     ASSERT_TRUE(r_unstab.error.find("residual") == std::string::npos);
 }
 
-// AC1/AC2 (format verification): the gate error message names the numeric
-// residual value and the limit, matching the pattern
-// "Riccati residual too large after refinement: X.XXXe-XX (limit 1e-8)".
-// This is verified by reading the message format in lqr.cpp; the tests above
-// confirm that no reachable input from this suite produces that message, so
-// neither false-positive nor misclassification is possible here.
+// AC1: when the gate trips, the result is a failure with no gain, no Riccati
+// solution and no poles, and the message states the residual.  No
+// well-conditioned plant reaches the 1e-8 gate, so the test lowers it to zero:
+// any solve with a nonzero residual then trips it through the same code path.
+void test_residual_gate_failure_clears_result_and_states_residual() {
+    const LinearSystem sys = ballPlate();
+    Eigen::MatrixXd Q = eye(4);
+    Q(0, 0) = 50.0;
+    Q(1, 1) = 50.0;
+
+    const LqrResult ok = computeLQR(sys, Q, eye(2));
+    ASSERT_TRUE(ok.success);
+    ASSERT_TRUE(ok.residual > 0.0);  // otherwise a zero gate could not trip
+
+    const LqrResult r = computeLQR(sys, Q, eye(2), 0.0);
+    ASSERT_TRUE(!r.success);
+    ASSERT_EQ(r.K.size(), 0);
+    ASSERT_EQ(r.P.size(), 0);
+    ASSERT_TRUE(r.closed_loop_poles.empty());
+    ASSERT_TRUE(r.error.find("Riccati residual") != std::string::npos);
+
+    char residual_text[32];
+    std::snprintf(residual_text, sizeof(residual_text), "%.3e", ok.residual);
+    ASSERT_TRUE(r.error.find(residual_text) != std::string::npos);
+}
 
 }  // namespace
 
@@ -586,6 +605,7 @@ int main() {
     test_rejects_empty_system();
     test_residual_gate_is_never_tripped_by_suite_inputs();
     test_input_rejection_messages_do_not_contain_residual();
+    test_residual_gate_failure_clears_result_and_states_residual();
     std::printf("All lqr tests passed.\n");
     return 0;
 }
