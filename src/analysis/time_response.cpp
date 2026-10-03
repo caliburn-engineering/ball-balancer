@@ -40,21 +40,21 @@ TimeResponse computeImpulseResponse(
     int m = sys.inputs();
     TimeResponse result;
 
-    Eigen::VectorXd x = Eigen::VectorXd::Zero(n);
+    // True impulse: x(0) = B[:,j] * amplitude, then unforced evolution (u = 0).
+    Eigen::VectorXd x = sys.B.col(input_j) * amplitude;
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(m);
+
     int steps = static_cast<int>(duration / dt);
     result.points.reserve(steps + 1);
 
     for (int k = 0; k <= steps; ++k) {
         double t = k * dt;
-        Eigen::VectorXd u = Eigen::VectorXd::Zero(m);
-        if (k == 0) u(input_j) = amplitude / dt;
-
         Eigen::VectorXd y = sys.C * x + sys.D * u;
         result.points.push_back({t, x, y, u});
 
         if (k < steps) {
             DerivativeFn deriv = [&](double, const Eigen::VectorXd& state) -> Eigen::VectorXd {
-                return sys.A * state + sys.B * u;
+                return sys.A * state;
             };
             x = rk4_step(x, t, dt, deriv);
         }
