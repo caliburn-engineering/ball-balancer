@@ -306,6 +306,22 @@ if(NOT EMSCRIPTEN)
         set_tests_properties(test_live_oracle PROPERTIES
             LABELS       "live-oracle"
             SKIP_RETURN_CODE 77)
+
+        # Second independent oracle: pydrake's ContinuousAlgebraicRiccatiEquation
+        # (Schur-based / LAPACK).  Skipped at runtime when pydrake is absent;
+        # no new build option — it rides under CALIBURN_LIVE_ORACLE.
+        add_executable(test_pydrake_oracle tests/test_pydrake_oracle.cpp)
+        target_compile_definitions(test_pydrake_oracle PRIVATE
+            EXPORT_PLANTS_EXE="$<TARGET_FILE:export_plants>"
+            PYDRAKE_ORACLE_SCRIPT="${CMAKE_SOURCE_DIR}/tools/gen_oracle_pydrake.py"
+            ORACLE_FIXTURE_FILE="${CMAKE_SOURCE_DIR}/tests/oracle_fixture.h"
+            ORACLE_PYTHON="${CALIBURN_ORACLE_PYTHON}"
+        )
+        add_dependencies(test_pydrake_oracle export_plants)
+        add_test(NAME test_pydrake_oracle COMMAND test_pydrake_oracle)
+        set_tests_properties(test_pydrake_oracle PROPERTIES
+            LABELS       "live-oracle"
+            SKIP_RETURN_CODE 77)
     endif()
 endif()
 
