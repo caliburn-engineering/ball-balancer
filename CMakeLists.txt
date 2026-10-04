@@ -270,6 +270,38 @@ if(NOT EMSCRIPTEN)
     target_include_directories(export_plants PRIVATE tools)
 endif()
 
+# --- Live-oracle option (desktop only) ---
+# Regenerates oracle_fixture.h via the pipeline and cross-checks it against
+# the checked-in version.  Requires python3 + scipy on the build machine;
+# the test detects their absence at runtime and reports a ctest skip rather
+# than a failure.
+#
+# Named with the top-level project prefix so the option survives promotion out
+# of ball-balancer without a rename.
+#
+# Usage:
+#   cmake -S . -B build -DCALIBURN_LIVE_ORACLE=ON
+#   cmake --build build -j
+#   ctest --test-dir build -L live-oracle --output-on-failure
+if(NOT EMSCRIPTEN)
+    option(CALIBURN_LIVE_ORACLE
+           "Enable live-oracle tests: regenerate + cross-check oracle_fixture.h (requires python3 + scipy)"
+           OFF)
+    if(CALIBURN_LIVE_ORACLE)
+        add_executable(test_live_oracle tests/test_live_oracle.cpp)
+        target_compile_definitions(test_live_oracle PRIVATE
+            EXPORT_PLANTS_EXE="$<TARGET_FILE:export_plants>"
+            GEN_ORACLE_SCRIPT="${CMAKE_SOURCE_DIR}/tools/gen_oracle_fixtures.py"
+            ORACLE_FIXTURE_FILE="${CMAKE_SOURCE_DIR}/tests/oracle_fixture.h"
+        )
+        add_dependencies(test_live_oracle export_plants)
+        add_test(NAME test_live_oracle COMMAND test_live_oracle)
+        set_tests_properties(test_live_oracle PROPERTIES
+            LABELS       "live-oracle"
+            SKIP_RETURN_CODE 77)
+    endif()
+endif()
+
 # --- Visualizer executable ---
 add_executable(visualizer
     src/visualizer.cpp
