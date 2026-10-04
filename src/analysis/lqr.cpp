@@ -9,6 +9,7 @@
 #include <Eigen/SVD>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <utility>
 
@@ -199,7 +200,8 @@ LqrResult failure(std::string why) {
 
 LqrResult computeLQR(const LinearSystem& sys,
                      const Eigen::MatrixXd& Q,
-                     const Eigen::MatrixXd& R) {
+                     const Eigen::MatrixXd& R,
+                     double residual_gate) {
     const int n = sys.states();
     const int m = sys.inputs();
 
@@ -250,6 +252,18 @@ LqrResult computeLQR(const LinearSystem& sys,
     LqrResult result;
     result.pre_refinement_residual = relRiccatiResidual(sys.A, sys.B, Q, R_chol, P);
     result.residual = kleinmanRefine(sys.A, sys.B, Q, R_chol, P);
+
+    // A residual above the gate after refinement means the sign function found
+    // the wrong invariant subspace or P came out of its blocks badly.  Returning
+    // that gain would break the contract, so it is a failure like any other.
+    if (result.residual > residual_gate) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+                      "Riccati residual too large after refinement: %.3e (limit %.0e)",
+                      result.residual, residual_gate);
+        return failure(std::string(buf));
+    }
+
     result.P = P;
     result.K = R_chol.solve(sys.B.transpose() * P);
 
