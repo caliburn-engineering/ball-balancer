@@ -280,19 +280,26 @@ endif()
 # of ball-balancer without a rename.
 #
 # Usage:
-#   cmake -S . -B build -DCALIBURN_LIVE_ORACLE=ON
-#   cmake --build build -j
+#   cmake -S . -B build -DCALIBURN_LIVE_ORACLE=ON \
+#         -DCALIBURN_ORACLE_PYTHON=.oracle_venv/bin/python3
+#   cmake --build build -j2
 #   ctest --test-dir build -L live-oracle --output-on-failure
+#
+# CALIBURN_ORACLE_PYTHON is the interpreter the test runs the generator with;
+# point it at the venv tools/requirements.txt was installed into.
 if(NOT EMSCRIPTEN)
     option(CALIBURN_LIVE_ORACLE
            "Enable live-oracle tests: regenerate + cross-check oracle_fixture.h (requires python3 + scipy)"
            OFF)
+    set(CALIBURN_ORACLE_PYTHON "python3" CACHE STRING
+        "Python interpreter with scipy, used by the live-oracle tests")
     if(CALIBURN_LIVE_ORACLE)
         add_executable(test_live_oracle tests/test_live_oracle.cpp)
         target_compile_definitions(test_live_oracle PRIVATE
             EXPORT_PLANTS_EXE="$<TARGET_FILE:export_plants>"
             GEN_ORACLE_SCRIPT="${CMAKE_SOURCE_DIR}/tools/gen_oracle_fixtures.py"
             ORACLE_FIXTURE_FILE="${CMAKE_SOURCE_DIR}/tests/oracle_fixture.h"
+            ORACLE_PYTHON="${CALIBURN_ORACLE_PYTHON}"
         )
         add_dependencies(test_live_oracle export_plants)
         add_test(NAME test_live_oracle COMMAND test_live_oracle)
